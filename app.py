@@ -1,104 +1,411 @@
 import hashlib
-import json
 import re
 from datetime import datetime
 from io import BytesIO
+from typing import Any
 
 import easyocr
 import numpy as np
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter
 
 
 # =========================================================
-# CONFIGURACIÓN GENERAL
+# CONFIGURACIÓN
 # =========================================================
 
 st.set_page_config(
-    page_title="Validador de Comprobantes",
+    page_title="Reportar un depósito",
     page_icon="🏦",
     layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
-BANK_NAMES = [
-    "Mercantil Banco",
-    "Banco Mercantil",
-    "Banco Nacional",
-    "Banco de Costa Rica",
-    "BAC Credomatic",
-    "BAC",
-    "Scotiabank",
-    "Davivienda",
-    "Banco General",
-    "Banistmo",
-    "Global Bank",
-    "Banco Pichincha",
-    "Banco Guayaquil",
-    "Banco Industrial",
-    "Banco Atlántida",
-    "Banco Ficohsa",
-    "Banco Promerica",
+DEPOSIT_ACCOUNTS = [
+    "MINOS S.A. - 02-4",
+    "Mercantil Banco - 030024",
+    "Banco General - 4589",
+    "BAC Credomatic - 7512",
 ]
+
+MONTHS_ES = {
+    "enero": "01",
+    "febrero": "02",
+    "marzo": "03",
+    "abril": "04",
+    "mayo": "05",
+    "junio": "06",
+    "julio": "07",
+    "agosto": "08",
+    "septiembre": "09",
+    "octubre": "10",
+    "noviembre": "11",
+    "diciembre": "12",
+}
 
 
 # =========================================================
-# CARGA DEL MOTOR OCR
+# ESTILOS
+# =========================================================
+
+st.markdown(
+    """
+    <style>
+        /* Ocultar elementos predeterminados de Streamlit */
+        #MainMenu {
+            visibility: hidden;
+        }
+
+        footer {
+            visibility: hidden;
+        }
+
+        header[data-testid="stHeader"] {
+            display: none;
+        }
+
+        .stDeployButton {
+            display: none;
+        }
+
+        /* Fondo principal */
+        .stApp {
+            background: #ffffff;
+        }
+
+        .block-container {
+            max-width: 1050px;
+            padding-top: 0;
+            padding-bottom: 60px;
+        }
+
+        /* Barra superior */
+        .top-header {
+            position: relative;
+            left: 50%;
+            right: 50%;
+            margin-left: -50vw;
+            margin-right: -50vw;
+            width: 100vw;
+            min-height: 81px;
+            background: #1b3b65;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 10px;
+        }
+
+        .top-header-inner {
+            width: min(100%, 1050px);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 25px;
+            box-sizing: border-box;
+        }
+
+        .brand {
+            color: #ffffff;
+            font-size: 43px;
+            font-weight: 800;
+            font-style: italic;
+            letter-spacing: -3px;
+            line-height: 1;
+        }
+
+        .nav-center {
+            display: flex;
+            align-items: center;
+            gap: 11px;
+        }
+
+        .nav-item {
+            background: #1763b4;
+            color: #ffffff;
+            padding: 12px 19px;
+            border-radius: 3px;
+            font-weight: 700;
+            font-size: 16px;
+        }
+
+        .nav-item.active {
+            background: #e9f2ff;
+            color: #15539a;
+        }
+
+        .nav-icons {
+            display: flex;
+            gap: 10px;
+        }
+
+        .nav-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: #1763b4;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 19px;
+        }
+
+        /* Contenido */
+        .cashier-shell {
+            width: 100%;
+            max-width: 550px;
+            margin: 0 auto;
+        }
+
+        .utility-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin: 5px 0 34px 0;
+        }
+
+        .back-pill {
+            display: inline-block;
+            background: #e8f5ff;
+            color: #17528c;
+            border-radius: 20px;
+            padding: 3px 8px;
+            font-size: 12px;
+        }
+
+        .balance-pill {
+            min-width: 145px;
+            text-align: center;
+            color: #15539a;
+            background: white;
+            border: 2px solid #b7d5fb;
+            border-radius: 16px;
+            padding: 1px 10px;
+            font-size: 12px;
+        }
+
+        .section-title {
+            color: #102f58;
+            font-size: 20px;
+            font-weight: 800;
+            margin: 0 0 23px 0;
+            padding-bottom: 8px;
+            position: relative;
+        }
+
+        .section-title::after {
+            content: "";
+            width: 108px;
+            height: 3px;
+            background: #153e73;
+            position: absolute;
+            left: 0;
+            bottom: 0;
+        }
+
+        .field-label {
+            color: #6c625c;
+            font-size: 16px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+
+        .amount-limits {
+            float: right;
+            font-size: 10px;
+            color: #6b6b6b;
+            font-weight: 400;
+            margin-top: 4px;
+        }
+
+        /* Widgets Streamlit */
+        div[data-testid="stSelectbox"] {
+            margin-bottom: 17px;
+        }
+
+        div[data-testid="stTextInput"] {
+            margin-bottom: 17px;
+        }
+
+        div[data-testid="stSelectbox"] label,
+        div[data-testid="stTextInput"] label,
+        div[data-testid="stFileUploader"] label {
+            color: #6c625c !important;
+            font-weight: 700 !important;
+            font-size: 16px !important;
+        }
+
+        div[data-baseweb="select"] > div {
+            min-height: 50px;
+            background: #edf4fd !important;
+            border: 1px solid #aeb8c5 !important;
+            border-radius: 2px !important;
+        }
+
+        div[data-baseweb="select"] span {
+            color: #8b8b8b;
+            font-weight: 700;
+        }
+
+        .stTextInput input {
+            height: 50px;
+            background: #edf4fd !important;
+            border: none !important;
+            border-radius: 2px !important;
+            color: #183758 !important;
+            font-weight: 600;
+        }
+
+        .stTextInput input::placeholder {
+            color: #a8aaad !important;
+        }
+
+        .amount-field input {
+            text-align: center !important;
+            letter-spacing: 4px;
+            font-size: 17px !important;
+            color: #8f8f8f !important;
+        }
+
+        /* Cargador */
+        div[data-testid="stFileUploaderDropzone"] {
+            background: #f3f7fd;
+            border: 1px dashed #1c497c;
+            border-radius: 2px;
+            min-height: 72px;
+            padding: 9px 12px;
+        }
+
+        div[data-testid="stFileUploaderDropzone"] button {
+            background: transparent !important;
+            color: #17528c !important;
+            border: none !important;
+        }
+
+        div[data-testid="stFileUploaderDropzone"] small {
+            color: #676767 !important;
+        }
+
+        div[data-testid="stFileUploaderFile"] {
+            background: #edf4fd;
+        }
+
+        /* Botón */
+        .stButton > button,
+        .stFormSubmitButton > button {
+            width: 100%;
+            min-height: 49px;
+            border-radius: 3px;
+            border: none;
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .stFormSubmitButton > button[kind="primary"] {
+            background: #1763b4;
+            color: white;
+        }
+
+        .stFormSubmitButton > button:disabled {
+            background: #eef0f2 !important;
+            color: #c3c3c3 !important;
+        }
+
+        .cancel-link {
+            text-align: center;
+            color: #725246;
+            font-size: 14px;
+            margin-top: 9px;
+        }
+
+        .required-message {
+            color: #003b70;
+            font-size: 14px;
+            margin-top: -8px;
+            margin-bottom: 20px;
+        }
+
+        .ocr-message {
+            border-left: 4px solid #1763b4;
+            background: #edf5ff;
+            color: #143d68;
+            padding: 12px 14px;
+            border-radius: 3px;
+            margin: 12px 0 18px 0;
+            font-size: 14px;
+        }
+
+        /* Ocultar etiquetas vacías */
+        .hidden-label {
+            display: none;
+        }
+
+        @media (max-width: 760px) {
+            .brand {
+                font-size: 32px;
+            }
+
+            .nav-center {
+                display: none;
+            }
+
+            .top-header-inner {
+                padding: 0 15px;
+            }
+
+            .block-container {
+                padding-left: 18px;
+                padding-right: 18px;
+            }
+
+            .cashier-shell {
+                max-width: 100%;
+            }
+        }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# =========================================================
+# FUNCIONES OCR
 # =========================================================
 
 @st.cache_resource
-def load_ocr_reader():
-    """
-    Carga EasyOCR una sola vez.
-
-    gpu=False permite usarlo sin tarjeta gráfica dedicada.
-    """
+def load_reader() -> easyocr.Reader:
     return easyocr.Reader(
         ["es", "en"],
         gpu=False,
     )
 
 
-# =========================================================
-# FUNCIONES AUXILIARES
-# =========================================================
-
-def clean_text(value: str | None) -> str:
+def clean_text(value: Any) -> str:
     if value is None:
         return ""
 
     return re.sub(r"\s+", " ", str(value)).strip()
 
 
-def clean_number(value: str) -> float | None:
-    """
-    Convierte diferentes formatos de monto a float.
-
-    Ejemplos:
-    1,250.50 -> 1250.50
-    1.250,50 -> 1250.50
-    62.50    -> 62.50
-    """
-    value = clean_text(value)
-
+def parse_amount(value: str | None) -> float | None:
     if not value:
         return None
 
     value = re.sub(r"[^\d,.\-]", "", value)
 
+    if not value:
+        return None
+
     try:
         if "," in value and "." in value:
-            # Formato 1.250,50
             if value.rfind(",") > value.rfind("."):
                 value = value.replace(".", "")
                 value = value.replace(",", ".")
             else:
-                # Formato 1,250.50
                 value = value.replace(",", "")
 
         elif "," in value:
-            decimal_digits = len(value.split(",")[-1])
-
-            if decimal_digits == 2:
+            if len(value.split(",")[-1]) == 2:
                 value = value.replace(",", ".")
             else:
                 value = value.replace(",", "")
@@ -116,234 +423,172 @@ def format_amount(value: float | None) -> str:
     return f"{value:.2f}"
 
 
-def get_uploaded_file_id(file_bytes: bytes) -> str:
-    return hashlib.sha256(file_bytes).hexdigest()
+def normalize_date(value: str | None) -> str:
+    if not value:
+        return ""
+
+    value = clean_text(value).lower()
+
+    month_pattern = "|".join(MONTHS_ES.keys())
+
+    text_date = re.search(
+        rf"(\d{{1,2}})\s+({month_pattern})\s+(\d{{4}})",
+        value,
+        re.IGNORECASE,
+    )
+
+    if text_date:
+        day = text_date.group(1).zfill(2)
+        month = MONTHS_ES[text_date.group(2).lower()]
+        year = text_date.group(3)
+
+        return f"{day}/{month}/{year}"
+
+    numeric_date = re.search(
+        r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b",
+        value,
+    )
+
+    if numeric_date:
+        day = numeric_date.group(1).zfill(2)
+        month = numeric_date.group(2).zfill(2)
+        year = numeric_date.group(3)
+
+        if len(year) == 2:
+            year = f"20{year}"
+
+        return f"{day}/{month}/{year}"
+
+    iso_date = re.search(
+        r"\b(\d{4})[/-](\d{1,2})[/-](\d{1,2})\b",
+        value,
+    )
+
+    if iso_date:
+        return (
+            f"{iso_date.group(3).zfill(2)}/"
+            f"{iso_date.group(2).zfill(2)}/"
+            f"{iso_date.group(1)}"
+        )
+
+    return clean_text(value)
 
 
-def find_next_line(lines: list[str], labels: set[str]) -> str | None:
-    """
-    Busca una etiqueta y devuelve la siguiente línea con contenido.
-    """
-    for index, line in enumerate(lines):
-        normalized_line = clean_text(line).lower()
+def extract_amounts(text: str) -> dict[str, float | None]:
+    normalized = clean_text(text)
 
-        if normalized_line in labels and index + 1 < len(lines):
-            return clean_text(lines[index + 1])
-
-    return None
-
-
-# =========================================================
-# EXTRACCIÓN DE MONTOS
-# =========================================================
-
-def extract_amounts(text: str) -> dict:
     result = {
         "amount": None,
         "commission": None,
         "tax": None,
-        "total_amount": None,
+        "total": None,
     }
 
-    normalized_text = clean_text(text)
+    number = r"([\d.,]+)"
 
-    amount_pattern = r"([\d.,]+(?:\d{2})?)"
+    main_patterns = [
+        rf"(?:¡?listo!?[\s,:-]*)?transferiste"
+        rf"[\s:]*\$?\s*{number}",
 
-    # Monto principal
-    main_amount_patterns = [
-        rf"(?:¡?listo!?[\s,:-]*)?transferiste[\s:]*\$?\s*{amount_pattern}",
-        rf"monto\s+transferido[\s:]*\$?\s*{amount_pattern}",
-        rf"importe\s+transferido[\s:]*\$?\s*{amount_pattern}",
-        rf"valor\s+transferido[\s:]*\$?\s*{amount_pattern}",
-        rf"monto[\s:]*\$?\s*{amount_pattern}",
-        rf"importe[\s:]*\$?\s*{amount_pattern}",
+        rf"monto\s+(?:transferido|depositado|enviado)"
+        rf"[\s:]*\$?\s*{number}",
+
+        rf"importe\s+(?:transferido|depositado|enviado)"
+        rf"[\s:]*\$?\s*{number}",
+
+        rf"(?:monto|importe|valor)"
+        rf"[\s:]*\$?\s*{number}",
     ]
 
-    for pattern in main_amount_patterns:
+    for pattern in main_patterns:
         match = re.search(
             pattern,
-            normalized_text,
+            normalized,
             re.IGNORECASE,
         )
 
         if match:
-            result["amount"] = clean_number(match.group(1))
+            result["amount"] = parse_amount(match.group(1))
 
             if result["amount"] is not None:
                 break
 
-    # Comisión
     commission_match = re.search(
-        rf"comisi[oó]n[\s:]*\$?\s*{amount_pattern}",
-        normalized_text,
+        rf"comisi[oó]n[\s:()+-]*\$?\s*{number}",
+        normalized,
         re.IGNORECASE,
     )
 
     if commission_match:
-        result["commission"] = clean_number(
+        result["commission"] = parse_amount(
             commission_match.group(1)
         )
 
-    # Impuesto
     tax_match = re.search(
-        rf"(?:ITBMS|IVA|impuesto)[\s:]*\$?\s*{amount_pattern}",
-        normalized_text,
+        rf"(?:ITBMS|IVA|impuesto)"
+        rf"[\s:()+-]*\$?\s*{number}",
+        normalized,
         re.IGNORECASE,
     )
 
     if tax_match:
-        result["tax"] = clean_number(
+        result["tax"] = parse_amount(
             tax_match.group(1)
         )
 
-    # Total
-    total_patterns = [
-        rf"total\s+a\s+pagar[\s:]*\$?\s*{amount_pattern}",
-        rf"total\s+pagado[\s:]*\$?\s*{amount_pattern}",
-        rf"total[\s:]*\$?\s*{amount_pattern}",
-    ]
-
-    for pattern in total_patterns:
-        total_match = re.search(
-            pattern,
-            normalized_text,
-            re.IGNORECASE,
-        )
-
-        if total_match:
-            result["total_amount"] = clean_number(
-                total_match.group(1)
-            )
-
-            if result["total_amount"] is not None:
-                break
-
-    # Respaldo: buscar todos los valores acompañados por moneda
-    money_matches = re.findall(
-        r"(?:\$|USD|DOP|CRC|PAB|MXN|GTQ|HNL|NIO|PEN|COP)"
-        r"\s*([\d.,]+)",
-        normalized_text,
+    total_match = re.search(
+        rf"total(?:\s+a\s+pagar|\s+pagado)?"
+        rf"[\s:]*\$?\s*{number}",
+        normalized,
         re.IGNORECASE,
     )
 
-    numeric_amounts = [
-        clean_number(value)
-        for value in money_matches
+    if total_match:
+        result["total"] = parse_amount(
+            total_match.group(1)
+        )
+
+    all_currency_amounts = re.findall(
+        r"(?:\$|USD|US\$|DOP|CRC|PAB|MXN|GTQ|HNL|NIO|PEN|COP)"
+        r"\s*([\d.,]+)",
+        normalized,
+        re.IGNORECASE,
+    )
+
+    parsed_amounts = [
+        amount
+        for amount in (
+            parse_amount(value)
+            for value in all_currency_amounts
+        )
+        if amount is not None
     ]
 
-    numeric_amounts = [
-        value
-        for value in numeric_amounts
-        if value is not None
-    ]
-
-    # Si no se identificó el monto por contexto,
-    # excluir comisión, impuesto y total.
-    if result["amount"] is None and numeric_amounts:
-        excluded_values = {
+    if result["amount"] is None and parsed_amounts:
+        excluded = {
             result["commission"],
             result["tax"],
-            result["total_amount"],
+            result["total"],
         }
 
         candidates = [
-            value
-            for value in numeric_amounts
-            if value not in excluded_values
+            amount
+            for amount in parsed_amounts
+            if amount not in excluded
         ]
 
         if candidates:
             result["amount"] = max(candidates)
         else:
-            result["amount"] = max(numeric_amounts)
+            result["amount"] = max(parsed_amounts)
 
     return result
 
 
-# =========================================================
-# EXTRACCIÓN DE CAMPOS
-# =========================================================
-
-def detect_bank(text: str) -> str | None:
-    lower_text = text.lower()
-
-    for bank in BANK_NAMES:
-        if bank.lower() in lower_text:
-            if "mercantil" in bank.lower():
-                return "Mercantil Banco"
-
-            return bank
-
-    return None
-
-
-def extract_account(text: str) -> str | None:
+def extract_reference(text: str) -> str:
     patterns = [
-        r"(?:CORRIENTE|AHORRO|CUENTA|ACCOUNT)"
-        r"\s*[:#-]?\s*([0-9*Xx\- ]{6,})",
-
-        r"(?:cuenta\s+destino|cuenta\s+beneficiaria)"
-        r"\s*[:#-]?\s*([0-9*Xx\- ]{6,})",
-    ]
-
-    for pattern in patterns:
-        match = re.search(
-            pattern,
-            text,
-            re.IGNORECASE,
-        )
-
-        if match:
-            account = clean_text(match.group(1))
-            account = re.sub(r"\s+", "", account)
-
-            return account
-
-    return None
-
-
-def extract_date(text: str) -> str | None:
-    months = (
-        r"enero|febrero|marzo|abril|mayo|junio|julio|"
-        r"agosto|septiembre|octubre|noviembre|diciembre"
-    )
-
-    patterns = [
-        rf"\b(\d{{1,2}}\s+(?:{months})\s+\d{{4}})\b",
-        r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b",
-        r"\b(\d{4}[/-]\d{1,2}[/-]\d{1,2})\b",
-    ]
-
-    for pattern in patterns:
-        match = re.search(
-            pattern,
-            text,
-            re.IGNORECASE,
-        )
-
-        if match:
-            return clean_text(match.group(1))
-
-    return None
-
-
-def extract_time(text: str) -> str | None:
-    match = re.search(
-        r"\b((?:[01]?\d|2[0-3]):[0-5]\d"
-        r"(?:\s*[AaPp]\.?[Mm]\.?)?)\b",
-        text,
-    )
-
-    if match:
-        return clean_text(match.group(1))
-
-    return None
-
-
-def extract_confirmation(text: str) -> str | None:
-    patterns = [
-        r"(?:Confirmación|Confirmacion|Referencia|Reference|"
-        r"Comprobante|Transacción|Transaccion)"
+        r"(?:confirmaci[oó]n|referencia|n[uú]mero\s+de\s+referencia|"
+        r"transacci[oó]n|operaci[oó]n)"
         r"\s*[:#-]?\s*([A-Z0-9\-]{5,})",
 
         r"#\s*([A-Z0-9\-]{5,})",
@@ -359,345 +604,344 @@ def extract_confirmation(text: str) -> str | None:
         if match:
             return clean_text(match.group(1)).replace("#", "")
 
-    return None
+    return ""
 
 
-def extract_receipt_data(text: str) -> dict:
-    lines = [
-        clean_text(line)
-        for line in text.splitlines()
-        if clean_text(line)
+def extract_date(text: str) -> str:
+    month_pattern = "|".join(MONTHS_ES.keys())
+
+    patterns = [
+        rf"\b(\d{{1,2}}\s+(?:{month_pattern})\s+\d{{4}})\b",
+        r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b",
+        r"\b(\d{4}[/-]\d{1,2}[/-]\d{1,2})\b",
     ]
 
-    amounts = extract_amounts(text)
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            text,
+            re.IGNORECASE,
+        )
 
-    description = find_next_line(
-        lines,
-        {"descripción", "descripcion", "concepto", "detalle"},
+        if match:
+            return normalize_date(match.group(1))
+
+    return ""
+
+
+def preprocess_image(image: Image.Image) -> Image.Image:
+    processed = image.convert("RGB")
+
+    if processed.width < 900:
+        scale = 900 / processed.width
+        processed = processed.resize(
+            (
+                int(processed.width * scale),
+                int(processed.height * scale),
+            )
+        )
+
+    processed = ImageEnhance.Contrast(
+        processed
+    ).enhance(1.15)
+
+    processed = processed.filter(
+        ImageFilter.SHARPEN
     )
 
-    sender = find_next_line(
-        lines,
-        {"desde", "ordenante", "remitente", "origen"},
-    )
+    return processed
 
-    recipient = find_next_line(
-        lines,
-        {"hacia", "destinatario", "beneficiario", "destino"},
-    )
-
-    return {
-        "bank": detect_bank(text),
-        "account": extract_account(text),
-        "amount": amounts["amount"],
-        "commission": amounts["commission"],
-        "tax": amounts["tax"],
-        "total_amount": amounts["total_amount"],
-        "date": extract_date(text),
-        "time": extract_time(text),
-        "confirmation": extract_confirmation(text),
-        "description": description,
-        "sender": sender,
-        "recipient": recipient,
-    }
-
-
-# =========================================================
-# OCR
-# =========================================================
 
 @st.cache_data(show_spinner=False)
-def process_image(file_bytes: bytes) -> dict:
-    """
-    Ejecuta OCR y devuelve el texto, confianza y campos extraídos.
-    """
-    image = Image.open(BytesIO(file_bytes)).convert("RGB")
-    image_array = np.array(image)
+def process_receipt(file_bytes: bytes) -> dict[str, Any]:
+    image = Image.open(
+        BytesIO(file_bytes)
+    ).convert("RGB")
 
-    reader = load_ocr_reader()
+    processed = preprocess_image(image)
+    reader = load_reader()
 
     results = reader.readtext(
-        image_array,
+        np.array(processed),
         detail=1,
         paragraph=False,
     )
 
-    detected_lines = []
-    confidence_values = []
+    lines: list[str] = []
+    confidences: list[float] = []
 
     for _, detected_text, confidence in results:
         detected_text = clean_text(detected_text)
 
         if detected_text:
-            detected_lines.append(detected_text)
-            confidence_values.append(float(confidence))
+            lines.append(detected_text)
+            confidences.append(float(confidence))
 
-    raw_text = "\n".join(detected_lines)
+    raw_text = "\n".join(lines)
+    amounts = extract_amounts(raw_text)
 
     average_confidence = (
-        sum(confidence_values) / len(confidence_values)
-        if confidence_values
+        sum(confidences) / len(confidences)
+        if confidences
         else 0.0
     )
 
     return {
         "raw_text": raw_text,
-        "average_confidence": average_confidence,
-        "extracted_data": extract_receipt_data(raw_text),
+        "amount": format_amount(amounts["amount"]),
+        "reference": extract_reference(raw_text),
+        "date": extract_date(raw_text),
+        "confidence": average_confidence,
     }
 
 
+def get_file_id(file_bytes: bytes) -> str:
+    return hashlib.sha256(file_bytes).hexdigest()
+
+
 # =========================================================
-# INTERFAZ
+# ESTADO DE SESIÓN
 # =========================================================
 
-st.title("🏦 Prototipo de lectura de comprobantes")
+if "current_file_id" not in st.session_state:
+    st.session_state.current_file_id = None
+
+if "ocr_data" not in st.session_state:
+    st.session_state.ocr_data = {
+        "amount": "",
+        "reference": "",
+        "date": "",
+        "raw_text": "",
+        "confidence": 0.0,
+    }
+
+if "deposit_submitted" not in st.session_state:
+    st.session_state.deposit_submitted = False
+
+
+# =========================================================
+# HEADER
+# =========================================================
 
 st.markdown(
     """
-Sube un comprobante bancario para extraer automáticamente sus datos.
-Los campos obtenidos por OCR pueden revisarse y corregirse antes de
-guardar el resultado.
-"""
+    <div class="top-header">
+        <div class="top-header-inner">
+            <div class="brand">betcris</div>
+
+            <div class="nav-center">
+                <div class="nav-item">Apuestas</div>
+                <div class="nav-item active">Depósito</div>
+                <div class="nav-item">Retiro</div>
+            </div>
+
+            <div class="nav-icons">
+                <div class="nav-icon">▢</div>
+                <div class="nav-icon">♙</div>
+                <div class="nav-icon">♢</div>
+            </div>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# =========================================================
+# FORMULARIO
+# =========================================================
+
+st.markdown('<div class="cashier-shell">', unsafe_allow_html=True)
+
+st.markdown(
+    """
+    <div class="utility-row">
+        <span class="back-pill">← Atrás</span>
+        <span class="balance-pill">Saldo&nbsp;&nbsp; USD $0.00</span>
+    </div>
+
+    <div class="section-title">REPORTAR UN DEPÓSITO</div>
+    """,
+    unsafe_allow_html=True,
+)
+
+account = st.selectbox(
+    "Selecciona la cuenta donde depositaste",
+    options=DEPOSIT_ACCOUNTS,
 )
 
 uploaded_file = st.file_uploader(
-    "Subir comprobante",
+    "Sube el comprobante del depósito",
     type=["jpg", "jpeg", "png"],
-    help="Formatos permitidos: JPG, JPEG y PNG.",
+    help="Tamaño máximo recomendado: 3 MB.",
+)
+
+if uploaded_file is not None:
+    file_bytes = uploaded_file.getvalue()
+    current_file_id = get_file_id(file_bytes)
+
+    if st.session_state.current_file_id != current_file_id:
+        st.session_state.current_file_id = current_file_id
+        st.session_state.deposit_submitted = False
+
+        with st.spinner(
+            "Leyendo la información del comprobante..."
+        ):
+            try:
+                st.session_state.ocr_data = process_receipt(
+                    file_bytes
+                )
+
+            except Exception as exc:
+                st.session_state.ocr_data = {
+                    "amount": "",
+                    "reference": "",
+                    "date": "",
+                    "raw_text": "",
+                    "confidence": 0.0,
+                }
+
+                st.error(
+                    "No fue posible procesar el comprobante."
+                )
+
+                with st.expander(
+                    "Ver detalle técnico"
+                ):
+                    st.exception(exc)
+
+    confidence = (
+        st.session_state.ocr_data["confidence"] * 100
+    )
+
+    st.markdown(
+        f"""
+        <div class="ocr-message">
+            El comprobante fue procesado automáticamente.
+            Revisa y corrige los campos antes de reportar el depósito.
+            <br>
+            <strong>Confianza promedio OCR:</strong>
+            {confidence:.1f}%
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+amount = st.text_input(
+    "Monto depositado",
+    value=st.session_state.ocr_data["amount"],
+    placeholder="USD 0.00",
+    help="Monto mínimo: USD 10.00. Monto máximo: USD 20,000.00.",
+)
+
+reference = st.text_input(
+    "Ingresa el número de referencia",
+    value=st.session_state.ocr_data["reference"],
+    placeholder="Número de referencia",
+)
+
+deposit_date = st.text_input(
+    "Selecciona la fecha del depósito",
+    value=st.session_state.ocr_data["date"],
+    placeholder="DD / MM / YYYY",
 )
 
 if uploaded_file is None:
-    st.info("Sube un comprobante para comenzar.")
-    st.stop()
+    st.markdown(
+        '<div class="required-message">'
+        "Este documento es obligatorio"
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
+parsed_amount = parse_amount(amount)
 
-file_bytes = uploaded_file.getvalue()
-file_id = get_uploaded_file_id(file_bytes)
-
-# Cuando cambia el documento, se limpia el estado anterior.
-if st.session_state.get("current_file_id") != file_id:
-    st.session_state.current_file_id = file_id
-    st.session_state.corrected_data = None
-
-
-with st.spinner("Procesando comprobante con OCR..."):
-    ocr_result = process_image(file_bytes)
-
-
-image = Image.open(BytesIO(file_bytes))
-extracted = ocr_result["extracted_data"]
-confidence = ocr_result["average_confidence"]
-
-left_column, right_column = st.columns(
-    [0.9, 1.1],
-    gap="large",
+required_fields_complete = all(
+    [
+        uploaded_file is not None,
+        parsed_amount is not None,
+        parsed_amount >= 10,
+        bool(clean_text(reference)),
+        bool(clean_text(deposit_date)),
+    ]
 )
 
-with left_column:
-    st.subheader("Comprobante")
-
-    st.image(
-        image,
-        width="stretch",
+if parsed_amount is not None and parsed_amount < 10:
+    st.warning(
+        "El monto mínimo permitido es USD 10.00."
     )
 
-    confidence_percentage = confidence * 100
-
-    st.metric(
-        "Confianza promedio del OCR",
-        f"{confidence_percentage:.1f}%",
+if parsed_amount is not None and parsed_amount > 20000:
+    st.warning(
+        "El monto máximo permitido es USD 20,000.00."
     )
+    required_fields_complete = False
 
-    if confidence_percentage >= 85:
-        st.success("Lectura OCR con confianza alta.")
-    elif confidence_percentage >= 65:
-        st.warning("Conviene revisar algunos campos.")
-    else:
-        st.error("La imagen requiere revisión manual.")
+submit_button = st.button(
+    "Reportar depósito",
+    type="primary",
+    disabled=not required_fields_complete,
+    use_container_width=True,
+)
 
+st.markdown(
+    '<div class="cancel-link">Cancelar</div>',
+    unsafe_allow_html=True,
+)
 
-with right_column:
-    st.subheader("Datos extraídos y editables")
-
-    st.caption(
-        "Corrige cualquier campo que el OCR no haya leído correctamente."
-    )
-
-    with st.form("correction_form"):
-        bank = st.text_input(
-            "Banco",
-            value=extracted["bank"] or "",
-        )
-
-        account = st.text_input(
-            "Cuenta",
-            value=extracted["account"] or "",
-        )
-
-        amount = st.text_input(
-            "Monto transferido",
-            value=format_amount(extracted["amount"]),
-        )
-
-        commission = st.text_input(
-            "Comisión",
-            value=format_amount(extracted["commission"]),
-        )
-
-        tax = st.text_input(
-            "Impuesto",
-            value=format_amount(extracted["tax"]),
-        )
-
-        total_amount = st.text_input(
-            "Total pagado",
-            value=format_amount(extracted["total_amount"]),
-        )
-
-        date = st.text_input(
-            "Fecha",
-            value=extracted["date"] or "",
-        )
-
-        time = st.text_input(
-            "Hora",
-            value=extracted["time"] or "",
-        )
-
-        confirmation = st.text_input(
-            "Confirmación o referencia",
-            value=extracted["confirmation"] or "",
-        )
-
-        description = st.text_input(
-            "Descripción",
-            value=extracted["description"] or "",
-        )
-
-        sender = st.text_input(
-            "Remitente",
-            value=extracted["sender"] or "",
-        )
-
-        recipient = st.text_input(
-            "Destinatario",
-            value=extracted["recipient"] or "",
-        )
-
-        submitted = st.form_submit_button(
-            "Guardar correcciones",
-            type="primary",
-            width="stretch",
-        )
+st.markdown("</div>", unsafe_allow_html=True)
 
 
-if submitted:
-    corrected_data = {
-        "bank": clean_text(bank),
-        "account": clean_text(account),
-        "amount": clean_number(amount),
-        "commission": clean_number(commission),
-        "tax": clean_number(tax),
-        "total_amount": clean_number(total_amount),
-        "date": clean_text(date),
-        "time": clean_text(time),
-        "confirmation": clean_text(confirmation),
-        "description": clean_text(description),
-        "sender": clean_text(sender),
-        "recipient": clean_text(recipient),
-        "source_file": uploaded_file.name,
-        "ocr_confidence": round(confidence, 4),
-        "reviewed_at": datetime.now().isoformat(
+# =========================================================
+# RESULTADO
+# =========================================================
+
+if submit_button:
+    st.session_state.deposit_submitted = True
+
+    deposit_result = {
+        "account": account,
+        "amount": parsed_amount,
+        "currency": "USD",
+        "reference": clean_text(reference),
+        "deposit_date": clean_text(deposit_date),
+        "receipt_file": uploaded_file.name,
+        "ocr_confidence": round(
+            st.session_state.ocr_data["confidence"],
+            4,
+        ),
+        "reported_at": datetime.now().isoformat(
             timespec="seconds"
         ),
     }
 
-    st.session_state.corrected_data = corrected_data
-    st.success("Las correcciones fueron guardadas.")
+    st.success(
+        "El depósito fue reportado correctamente."
+    )
 
-
-# =========================================================
-# RESULTADO GUARDADO Y DESCARGA
-# =========================================================
-
-if st.session_state.corrected_data:
-    st.divider()
-    st.subheader("Resultado revisado")
-
-    corrected_data = st.session_state.corrected_data
-
-    validation_messages = []
-
-    if not corrected_data["bank"]:
-        validation_messages.append(
-            "No se indicó el banco."
-        )
-
-    if not corrected_data["amount"]:
-        validation_messages.append(
-            "No se indicó el monto transferido."
-        )
-
-    if not corrected_data["confirmation"]:
-        validation_messages.append(
-            "No se indicó la confirmación o referencia."
-        )
-
-    if (
-        corrected_data["amount"] is not None
-        and corrected_data["commission"] is not None
-        and corrected_data["tax"] is not None
-        and corrected_data["total_amount"] is not None
+    with st.expander(
+        "Ver resultado del prototipo"
     ):
-        calculated_total = (
-            corrected_data["amount"]
-            + corrected_data["commission"]
-            + corrected_data["tax"]
-        )
+        st.json(deposit_result)
 
-        if abs(
-            calculated_total
-            - corrected_data["total_amount"]
-        ) > 0.02:
-            validation_messages.append(
-                "El monto, la comisión y el impuesto no coinciden "
-                "con el total pagado."
+
+if uploaded_file is not None:
+    with st.expander(
+        "Ver comprobante y texto detectado por OCR"
+    ):
+        preview_column, text_column = st.columns(2)
+
+        with preview_column:
+            st.image(
+                uploaded_file,
+                caption="Comprobante cargado",
+                use_container_width=True,
             )
 
-    if validation_messages:
-        for message in validation_messages:
-            st.warning(message)
-    else:
-        st.success(
-            "Los campos principales están completos."
-        )
-
-    st.json(corrected_data)
-
-    json_content = json.dumps(
-        corrected_data,
-        indent=4,
-        ensure_ascii=False,
-    )
-
-    st.download_button(
-        label="Descargar resultado en JSON",
-        data=json_content,
-        file_name="resultado_comprobante.json",
-        mime="application/json",
-        width="stretch",
-    )
-
-
-# =========================================================
-# TEXTO OCR
-# =========================================================
-
-with st.expander("Ver texto detectado por OCR"):
-    st.text_area(
-        "Texto completo",
-        value=ocr_result["raw_text"],
-        height=300,
-        disabled=True,
-    )
+        with text_column:
+            st.text_area(
+                "Texto detectado",
+                value=st.session_state.ocr_data["raw_text"],
+                height=350,
+                disabled=True,
+            )
