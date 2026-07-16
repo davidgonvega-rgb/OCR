@@ -2,6 +2,7 @@ import hashlib
 import re
 from datetime import datetime
 from io import BytesIO
+from textwrap import dedent
 from typing import Any
 
 import easyocr
@@ -10,9 +11,9 @@ import streamlit as st
 from PIL import Image, ImageEnhance, ImageFilter
 
 
-# =========================================================
-# CONFIGURACIÓN
-# =========================================================
+# ============================================================
+# CONFIGURACIÓN GENERAL
+# ============================================================
 
 st.set_page_config(
     page_title="Reportar un depósito",
@@ -44,341 +45,277 @@ MONTHS_ES = {
 }
 
 
-# =========================================================
+# ============================================================
 # ESTILOS
-# =========================================================
+# ============================================================
 
 st.markdown(
-    """
-    <style>
-        /* Ocultar elementos predeterminados de Streamlit */
-        #MainMenu {
-            visibility: hidden;
-        }
-
-        footer {
-            visibility: hidden;
-        }
-
-        header[data-testid="stHeader"] {
-            display: none;
-        }
-
-        .stDeployButton {
-            display: none;
-        }
-
-        /* Fondo principal */
-        .stApp {
-            background: #ffffff;
-        }
-
-        .block-container {
-            max-width: 1050px;
-            padding-top: 0;
-            padding-bottom: 60px;
-        }
-
-        /* Barra superior */
-        .top-header {
-            position: relative;
-            left: 50%;
-            right: 50%;
-            margin-left: -50vw;
-            margin-right: -50vw;
-            width: 100vw;
-            min-height: 81px;
-            background: #1b3b65;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin-bottom: 10px;
-        }
-
-        .top-header-inner {
-            width: min(100%, 1050px);
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 0 25px;
-            box-sizing: border-box;
-        }
-
-        .brand {
-            color: #ffffff;
-            font-size: 43px;
-            font-weight: 800;
-            font-style: italic;
-            letter-spacing: -3px;
-            line-height: 1;
-        }
-
-        .nav-center {
-            display: flex;
-            align-items: center;
-            gap: 11px;
-        }
-
-        .nav-item {
-            background: #1763b4;
-            color: #ffffff;
-            padding: 12px 19px;
-            border-radius: 3px;
-            font-weight: 700;
-            font-size: 16px;
-        }
-
-        .nav-item.active {
-            background: #e9f2ff;
-            color: #15539a;
-        }
-
-        .nav-icons {
-            display: flex;
-            gap: 10px;
-        }
-
-        .nav-icon {
-            width: 40px;
-            height: 40px;
-            border-radius: 50%;
-            background: #1763b4;
-            color: white;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 19px;
-        }
-
-        /* Contenido */
-        .cashier-shell {
-            width: 100%;
-            max-width: 550px;
-            margin: 0 auto;
-        }
-
-        .utility-row {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin: 5px 0 34px 0;
-        }
-
-        .back-pill {
-            display: inline-block;
-            background: #e8f5ff;
-            color: #17528c;
-            border-radius: 20px;
-            padding: 3px 8px;
-            font-size: 12px;
-        }
-
-        .balance-pill {
-            min-width: 145px;
-            text-align: center;
-            color: #15539a;
-            background: white;
-            border: 2px solid #b7d5fb;
-            border-radius: 16px;
-            padding: 1px 10px;
-            font-size: 12px;
-        }
-
-        .section-title {
-            color: #102f58;
-            font-size: 20px;
-            font-weight: 800;
-            margin: 0 0 23px 0;
-            padding-bottom: 8px;
-            position: relative;
-        }
-
-        .section-title::after {
-            content: "";
-            width: 108px;
-            height: 3px;
-            background: #153e73;
-            position: absolute;
-            left: 0;
-            bottom: 0;
-        }
-
-        .field-label {
-            color: #6c625c;
-            font-size: 16px;
-            font-weight: 700;
-            margin-bottom: 8px;
-        }
-
-        .amount-limits {
-            float: right;
-            font-size: 10px;
-            color: #6b6b6b;
-            font-weight: 400;
-            margin-top: 4px;
-        }
-
-        /* Widgets Streamlit */
-        div[data-testid="stSelectbox"] {
-            margin-bottom: 17px;
-        }
-
-        div[data-testid="stTextInput"] {
-            margin-bottom: 17px;
-        }
-
-        div[data-testid="stSelectbox"] label,
-        div[data-testid="stTextInput"] label,
-        div[data-testid="stFileUploader"] label {
-            color: #6c625c !important;
-            font-weight: 700 !important;
-            font-size: 16px !important;
-        }
-
-        div[data-baseweb="select"] > div {
-            min-height: 50px;
-            background: #edf4fd !important;
-            border: 1px solid #aeb8c5 !important;
-            border-radius: 2px !important;
-        }
-
-        div[data-baseweb="select"] span {
-            color: #8b8b8b;
-            font-weight: 700;
-        }
-
-        .stTextInput input {
-            height: 50px;
-            background: #edf4fd !important;
-            border: none !important;
-            border-radius: 2px !important;
-            color: #183758 !important;
-            font-weight: 600;
-        }
-
-        .stTextInput input::placeholder {
-            color: #a8aaad !important;
-        }
-
-        .amount-field input {
-            text-align: center !important;
-            letter-spacing: 4px;
-            font-size: 17px !important;
-            color: #8f8f8f !important;
-        }
-
-        /* Cargador */
-        div[data-testid="stFileUploaderDropzone"] {
-            background: #f3f7fd;
-            border: 1px dashed #1c497c;
-            border-radius: 2px;
-            min-height: 72px;
-            padding: 9px 12px;
-        }
-
-        div[data-testid="stFileUploaderDropzone"] button {
-            background: transparent !important;
-            color: #17528c !important;
-            border: none !important;
-        }
-
-        div[data-testid="stFileUploaderDropzone"] small {
-            color: #676767 !important;
-        }
-
-        div[data-testid="stFileUploaderFile"] {
-            background: #edf4fd;
-        }
-
-        /* Botón */
-        .stButton > button,
-        .stFormSubmitButton > button {
-            width: 100%;
-            min-height: 49px;
-            border-radius: 3px;
-            border: none;
-            font-size: 16px;
-            font-weight: 600;
-        }
-
-        .stFormSubmitButton > button[kind="primary"] {
-            background: #1763b4;
-            color: white;
-        }
-
-        .stFormSubmitButton > button:disabled {
-            background: #eef0f2 !important;
-            color: #c3c3c3 !important;
-        }
-
-        .cancel-link {
-            text-align: center;
-            color: #725246;
-            font-size: 14px;
-            margin-top: 9px;
-        }
-
-        .required-message {
-            color: #003b70;
-            font-size: 14px;
-            margin-top: -8px;
-            margin-bottom: 20px;
-        }
-
-        .ocr-message {
-            border-left: 4px solid #1763b4;
-            background: #edf5ff;
-            color: #143d68;
-            padding: 12px 14px;
-            border-radius: 3px;
-            margin: 12px 0 18px 0;
-            font-size: 14px;
-        }
-
-        /* Ocultar etiquetas vacías */
-        .hidden-label {
-            display: none;
-        }
-
-        @media (max-width: 760px) {
-            .brand {
-                font-size: 32px;
+    dedent(
+        """
+        <style>
+            #MainMenu {
+                visibility: hidden;
             }
 
-            .nav-center {
+            footer {
+                visibility: hidden;
+            }
+
+            header[data-testid="stHeader"] {
                 display: none;
             }
 
-            .top-header-inner {
-                padding: 0 15px;
+            .stApp {
+                background-color: #ffffff;
             }
 
             .block-container {
-                padding-left: 18px;
-                padding-right: 18px;
+                max-width: 1050px;
+                padding-top: 0;
+                padding-bottom: 60px;
+            }
+
+            .top-header {
+                position: relative;
+                left: 50%;
+                width: 100vw;
+                margin-left: -50vw;
+                background-color: #1d3f69;
+                min-height: 80px;
+                margin-bottom: 10px;
+            }
+
+            .top-header-inner {
+                max-width: 1050px;
+                min-height: 80px;
+                margin: 0 auto;
+                padding: 0 24px;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                box-sizing: border-box;
+            }
+
+            .brand {
+                color: #ffffff;
+                font-size: 42px;
+                font-weight: 800;
+                font-style: italic;
+                letter-spacing: -3px;
+            }
+
+            .nav-center {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+            }
+
+            .nav-item {
+                background-color: #1763b4;
+                color: #ffffff;
+                padding: 12px 18px;
+                border-radius: 3px;
+                font-size: 16px;
+                font-weight: 700;
+            }
+
+            .nav-item.active {
+                background-color: #e9f2ff;
+                color: #15539a;
+            }
+
+            .nav-icons {
+                display: flex;
+                gap: 10px;
+            }
+
+            .nav-icon {
+                width: 40px;
+                height: 40px;
+                border-radius: 50%;
+                background-color: #1763b4;
+                color: #ffffff;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 18px;
             }
 
             .cashier-shell {
-                max-width: 100%;
+                width: 100%;
+                max-width: 550px;
+                margin: 0 auto;
             }
-        }
-    </style>
-    """,
+
+            .utility-row {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                margin-top: 8px;
+                margin-bottom: 34px;
+            }
+
+            .back-pill {
+                display: inline-block;
+                background-color: #e8f5ff;
+                color: #17528c;
+                border-radius: 20px;
+                padding: 4px 9px;
+                font-size: 12px;
+            }
+
+            .balance-pill {
+                min-width: 145px;
+                text-align: center;
+                color: #15539a;
+                background-color: #ffffff;
+                border: 2px solid #b7d5fb;
+                border-radius: 16px;
+                padding: 2px 10px;
+                font-size: 12px;
+            }
+
+            .section-title {
+                position: relative;
+                color: #102f58;
+                font-size: 20px;
+                font-weight: 800;
+                margin-bottom: 24px;
+                padding-bottom: 9px;
+            }
+
+            .section-title::after {
+                content: "";
+                position: absolute;
+                left: 0;
+                bottom: 0;
+                width: 108px;
+                height: 3px;
+                background-color: #153e73;
+            }
+
+            div[data-testid="stSelectbox"],
+            div[data-testid="stTextInput"],
+            div[data-testid="stFileUploader"] {
+                margin-bottom: 14px;
+            }
+
+            div[data-testid="stSelectbox"] label,
+            div[data-testid="stTextInput"] label,
+            div[data-testid="stFileUploader"] label {
+                color: #6c625c !important;
+                font-size: 16px !important;
+                font-weight: 700 !important;
+            }
+
+            div[data-baseweb="select"] > div {
+                min-height: 50px;
+                background-color: #edf4fd !important;
+                border: 1px solid #aeb8c5 !important;
+                border-radius: 2px !important;
+            }
+
+            .stTextInput input {
+                height: 50px;
+                color: #183758 !important;
+                background-color: #edf4fd !important;
+                border: none !important;
+                border-radius: 2px !important;
+                font-weight: 600;
+            }
+
+            .stTextInput input::placeholder {
+                color: #a8aaad !important;
+            }
+
+            div[data-testid="stFileUploaderDropzone"] {
+                min-height: 72px;
+                padding: 10px 12px;
+                background-color: #f3f7fd;
+                border: 1px dashed #1c497c;
+                border-radius: 2px;
+            }
+
+            div[data-testid="stFileUploaderDropzone"] button {
+                color: #17528c !important;
+                background-color: transparent !important;
+            }
+
+            .ocr-message {
+                margin: 10px 0 18px 0;
+                padding: 12px 14px;
+                color: #143d68;
+                background-color: #edf5ff;
+                border-left: 4px solid #1763b4;
+                border-radius: 3px;
+                font-size: 14px;
+            }
+
+            .required-message {
+                color: #003b70;
+                font-size: 14px;
+                margin-top: -7px;
+                margin-bottom: 18px;
+            }
+
+            .cancel-link {
+                text-align: center;
+                color: #725246;
+                font-size: 14px;
+                margin-top: 9px;
+            }
+
+            .stButton > button {
+                width: 100%;
+                min-height: 49px;
+                border: none;
+                border-radius: 3px;
+                font-size: 16px;
+                font-weight: 600;
+            }
+
+            .stButton > button[kind="primary"] {
+                color: #ffffff;
+                background-color: #1763b4;
+            }
+
+            .stButton > button:disabled {
+                color: #c3c3c3 !important;
+                background-color: #eef0f2 !important;
+            }
+
+            @media (max-width: 760px) {
+                .nav-center {
+                    display: none;
+                }
+
+                .brand {
+                    font-size: 32px;
+                }
+
+                .top-header-inner {
+                    padding: 0 15px;
+                }
+
+                .block-container {
+                    padding-left: 18px;
+                    padding-right: 18px;
+                }
+
+                .cashier-shell {
+                    max-width: 100%;
+                }
+            }
+        </style>
+        """
+    ),
     unsafe_allow_html=True,
 )
 
 
-# =========================================================
-# FUNCIONES OCR
-# =========================================================
-
-@st.cache_resource
-def load_reader() -> easyocr.Reader:
-    return easyocr.Reader(
-        ["es", "en"],
-        gpu=False,
-    )
-
+# ============================================================
+# FUNCIONES GENERALES
+# ============================================================
 
 def clean_text(value: Any) -> str:
     if value is None:
@@ -387,32 +324,46 @@ def clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value)).strip()
 
 
-def parse_amount(value: str | None) -> float | None:
-    if not value:
+def parse_amount(value: Any) -> float | None:
+    """
+    Convierte formatos como:
+    62.50
+    $62.50
+    1,250.50
+    1.250,50
+    """
+    if value is None:
         return None
 
-    value = re.sub(r"[^\d,.\-]", "", value)
+    normalized = clean_text(value)
 
-    if not value:
+    if not normalized:
+        return None
+
+    normalized = re.sub(r"[^\d,.\-]", "", normalized)
+
+    if not normalized:
         return None
 
     try:
-        if "," in value and "." in value:
-            if value.rfind(",") > value.rfind("."):
-                value = value.replace(".", "")
-                value = value.replace(",", ".")
+        if "," in normalized and "." in normalized:
+            if normalized.rfind(",") > normalized.rfind("."):
+                normalized = normalized.replace(".", "")
+                normalized = normalized.replace(",", ".")
             else:
-                value = value.replace(",", "")
+                normalized = normalized.replace(",", "")
 
-        elif "," in value:
-            if len(value.split(",")[-1]) == 2:
-                value = value.replace(",", ".")
+        elif "," in normalized:
+            last_part = normalized.split(",")[-1]
+
+            if len(last_part) == 2:
+                normalized = normalized.replace(",", ".")
             else:
-                value = value.replace(",", "")
+                normalized = normalized.replace(",", "")
 
-        return float(value)
+        return float(normalized)
 
-    except ValueError:
+    except (ValueError, TypeError):
         return None
 
 
@@ -423,17 +374,24 @@ def format_amount(value: float | None) -> str:
     return f"{value:.2f}"
 
 
+def get_file_id(file_bytes: bytes) -> str:
+    return hashlib.sha256(file_bytes).hexdigest()
+
+
+# ============================================================
+# FECHAS
+# ============================================================
+
 def normalize_date(value: str | None) -> str:
     if not value:
         return ""
 
-    value = clean_text(value).lower()
-
+    normalized = clean_text(value).lower()
     month_pattern = "|".join(MONTHS_ES.keys())
 
     text_date = re.search(
         rf"(\d{{1,2}})\s+({month_pattern})\s+(\d{{4}})",
-        value,
+        normalized,
         re.IGNORECASE,
     )
 
@@ -446,7 +404,7 @@ def normalize_date(value: str | None) -> str:
 
     numeric_date = re.search(
         r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b",
-        value,
+        normalized,
     )
 
     if numeric_date:
@@ -461,150 +419,17 @@ def normalize_date(value: str | None) -> str:
 
     iso_date = re.search(
         r"\b(\d{4})[/-](\d{1,2})[/-](\d{1,2})\b",
-        value,
+        normalized,
     )
 
     if iso_date:
-        return (
-            f"{iso_date.group(3).zfill(2)}/"
-            f"{iso_date.group(2).zfill(2)}/"
-            f"{iso_date.group(1)}"
-        )
+        year = iso_date.group(1)
+        month = iso_date.group(2).zfill(2)
+        day = iso_date.group(3).zfill(2)
+
+        return f"{day}/{month}/{year}"
 
     return clean_text(value)
-
-
-def extract_amounts(text: str) -> dict[str, float | None]:
-    normalized = clean_text(text)
-
-    result = {
-        "amount": None,
-        "commission": None,
-        "tax": None,
-        "total": None,
-    }
-
-    number = r"([\d.,]+)"
-
-    main_patterns = [
-        rf"(?:¡?listo!?[\s,:-]*)?transferiste"
-        rf"[\s:]*\$?\s*{number}",
-
-        rf"monto\s+(?:transferido|depositado|enviado)"
-        rf"[\s:]*\$?\s*{number}",
-
-        rf"importe\s+(?:transferido|depositado|enviado)"
-        rf"[\s:]*\$?\s*{number}",
-
-        rf"(?:monto|importe|valor)"
-        rf"[\s:]*\$?\s*{number}",
-    ]
-
-    for pattern in main_patterns:
-        match = re.search(
-            pattern,
-            normalized,
-            re.IGNORECASE,
-        )
-
-        if match:
-            result["amount"] = parse_amount(match.group(1))
-
-            if result["amount"] is not None:
-                break
-
-    commission_match = re.search(
-        rf"comisi[oó]n[\s:()+-]*\$?\s*{number}",
-        normalized,
-        re.IGNORECASE,
-    )
-
-    if commission_match:
-        result["commission"] = parse_amount(
-            commission_match.group(1)
-        )
-
-    tax_match = re.search(
-        rf"(?:ITBMS|IVA|impuesto)"
-        rf"[\s:()+-]*\$?\s*{number}",
-        normalized,
-        re.IGNORECASE,
-    )
-
-    if tax_match:
-        result["tax"] = parse_amount(
-            tax_match.group(1)
-        )
-
-    total_match = re.search(
-        rf"total(?:\s+a\s+pagar|\s+pagado)?"
-        rf"[\s:]*\$?\s*{number}",
-        normalized,
-        re.IGNORECASE,
-    )
-
-    if total_match:
-        result["total"] = parse_amount(
-            total_match.group(1)
-        )
-
-    all_currency_amounts = re.findall(
-        r"(?:\$|USD|US\$|DOP|CRC|PAB|MXN|GTQ|HNL|NIO|PEN|COP)"
-        r"\s*([\d.,]+)",
-        normalized,
-        re.IGNORECASE,
-    )
-
-    parsed_amounts = [
-        amount
-        for amount in (
-            parse_amount(value)
-            for value in all_currency_amounts
-        )
-        if amount is not None
-    ]
-
-    if result["amount"] is None and parsed_amounts:
-        excluded = {
-            result["commission"],
-            result["tax"],
-            result["total"],
-        }
-
-        candidates = [
-            amount
-            for amount in parsed_amounts
-            if amount not in excluded
-        ]
-
-        if candidates:
-            result["amount"] = max(candidates)
-        else:
-            result["amount"] = max(parsed_amounts)
-
-    return result
-
-
-def extract_reference(text: str) -> str:
-    patterns = [
-        r"(?:confirmaci[oó]n|referencia|n[uú]mero\s+de\s+referencia|"
-        r"transacci[oó]n|operaci[oó]n)"
-        r"\s*[:#-]?\s*([A-Z0-9\-]{5,})",
-
-        r"#\s*([A-Z0-9\-]{5,})",
-    ]
-
-    for pattern in patterns:
-        match = re.search(
-            pattern,
-            text,
-            re.IGNORECASE,
-        )
-
-        if match:
-            return clean_text(match.group(1)).replace("#", "")
-
-    return ""
 
 
 def extract_date(text: str) -> str:
@@ -617,11 +442,7 @@ def extract_date(text: str) -> str:
     ]
 
     for pattern in patterns:
-        match = re.search(
-            pattern,
-            text,
-            re.IGNORECASE,
-        )
+        match = re.search(pattern, text, re.IGNORECASE)
 
         if match:
             return normalize_date(match.group(1))
@@ -629,11 +450,154 @@ def extract_date(text: str) -> str:
     return ""
 
 
+# ============================================================
+# EXTRACCIÓN DE MONTOS
+# ============================================================
+
+def extract_amounts(text: str) -> dict[str, float | None]:
+    normalized = clean_text(text)
+
+    result = {
+        "amount": None,
+        "commission": None,
+        "tax": None,
+        "total": None,
+    }
+
+    number_pattern = r"([\d.,]+)"
+
+    main_patterns = [
+        rf"(?:¡?listo!?[\s,:-]*)?transferiste"
+        rf"[\s:]*\$?\s*{number_pattern}",
+
+        rf"monto\s+(?:transferido|depositado|enviado)"
+        rf"[\s:]*\$?\s*{number_pattern}",
+
+        rf"importe\s+(?:transferido|depositado|enviado)"
+        rf"[\s:]*\$?\s*{number_pattern}",
+
+        rf"(?:monto|importe|valor)"
+        rf"[\s:]*\$?\s*{number_pattern}",
+    ]
+
+    for pattern in main_patterns:
+        match = re.search(pattern, normalized, re.IGNORECASE)
+
+        if match:
+            candidate = parse_amount(match.group(1))
+
+            if candidate is not None:
+                result["amount"] = candidate
+                break
+
+    commission_match = re.search(
+        rf"comisi[oó]n[\s:()+-]*\$?\s*{number_pattern}",
+        normalized,
+        re.IGNORECASE,
+    )
+
+    if commission_match:
+        result["commission"] = parse_amount(
+            commission_match.group(1)
+        )
+
+    tax_match = re.search(
+        rf"(?:ITBMS|IVA|impuesto)"
+        rf"[\s:()+-]*\$?\s*{number_pattern}",
+        normalized,
+        re.IGNORECASE,
+    )
+
+    if tax_match:
+        result["tax"] = parse_amount(
+            tax_match.group(1)
+        )
+
+    total_patterns = [
+        rf"total\s+a\s+pagar[\s:]*\$?\s*{number_pattern}",
+        rf"total\s+pagado[\s:]*\$?\s*{number_pattern}",
+        rf"total[\s:]*\$?\s*{number_pattern}",
+    ]
+
+    for pattern in total_patterns:
+        match = re.search(pattern, normalized, re.IGNORECASE)
+
+        if match:
+            candidate = parse_amount(match.group(1))
+
+            if candidate is not None:
+                result["total"] = candidate
+                break
+
+    currency_amounts = re.findall(
+        r"(?:\$|USD|US\$|DOP|CRC|PAB|MXN|GTQ|HNL|NIO|PEN|COP)"
+        r"\s*([\d.,]+)",
+        normalized,
+        re.IGNORECASE,
+    )
+
+    parsed_candidates = [
+        amount
+        for amount in (
+            parse_amount(value)
+            for value in currency_amounts
+        )
+        if amount is not None
+    ]
+
+    if result["amount"] is None and parsed_candidates:
+        excluded_values = {
+            result["commission"],
+            result["tax"],
+            result["total"],
+        }
+
+        candidates = [
+            amount
+            for amount in parsed_candidates
+            if amount not in excluded_values
+        ]
+
+        if candidates:
+            result["amount"] = max(candidates)
+        else:
+            result["amount"] = max(parsed_candidates)
+
+    return result
+
+
+# ============================================================
+# REFERENCIA
+# ============================================================
+
+def extract_reference(text: str) -> str:
+    patterns = [
+        r"(?:confirmaci[oó]n|referencia|n[uú]mero\s+de\s+referencia|"
+        r"transacci[oó]n|n[uú]mero\s+de\s+operaci[oó]n|operaci[oó]n)"
+        r"\s*[:#-]?\s*([A-Z0-9\-]{5,})",
+
+        r"#\s*([A-Z0-9\-]{5,})",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+
+        if match:
+            return clean_text(match.group(1)).replace("#", "")
+
+    return ""
+
+
+# ============================================================
+# PROCESAMIENTO DE IMAGEN
+# ============================================================
+
 def preprocess_image(image: Image.Image) -> Image.Image:
     processed = image.convert("RGB")
 
     if processed.width < 900:
         scale = 900 / processed.width
+
         processed = processed.resize(
             (
                 int(processed.width * scale),
@@ -652,32 +616,40 @@ def preprocess_image(image: Image.Image) -> Image.Image:
     return processed
 
 
+@st.cache_resource
+def load_reader() -> easyocr.Reader:
+    return easyocr.Reader(
+        ["es", "en"],
+        gpu=False,
+    )
+
+
 @st.cache_data(show_spinner=False)
 def process_receipt(file_bytes: bytes) -> dict[str, Any]:
     image = Image.open(
         BytesIO(file_bytes)
     ).convert("RGB")
 
-    processed = preprocess_image(image)
+    processed_image = preprocess_image(image)
     reader = load_reader()
 
     results = reader.readtext(
-        np.array(processed),
+        np.array(processed_image),
         detail=1,
         paragraph=False,
     )
 
-    lines: list[str] = []
+    detected_lines: list[str] = []
     confidences: list[float] = []
 
     for _, detected_text, confidence in results:
         detected_text = clean_text(detected_text)
 
         if detected_text:
-            lines.append(detected_text)
+            detected_lines.append(detected_text)
             confidences.append(float(confidence))
 
-    raw_text = "\n".join(lines)
+    raw_text = "\n".join(detected_lines)
     amounts = extract_amounts(raw_text)
 
     average_confidence = (
@@ -695,35 +667,34 @@ def process_receipt(file_bytes: bytes) -> dict[str, Any]:
     }
 
 
-def get_file_id(file_bytes: bytes) -> str:
-    return hashlib.sha256(file_bytes).hexdigest()
-
-
-# =========================================================
+# ============================================================
 # ESTADO DE SESIÓN
-# =========================================================
+# ============================================================
 
 if "current_file_id" not in st.session_state:
     st.session_state.current_file_id = None
 
-if "ocr_data" not in st.session_state:
-    st.session_state.ocr_data = {
-        "amount": "",
-        "reference": "",
-        "date": "",
-        "raw_text": "",
-        "confidence": 0.0,
-    }
+if "ocr_amount" not in st.session_state:
+    st.session_state.ocr_amount = ""
 
-if "deposit_submitted" not in st.session_state:
-    st.session_state.deposit_submitted = False
+if "ocr_reference" not in st.session_state:
+    st.session_state.ocr_reference = ""
+
+if "ocr_date" not in st.session_state:
+    st.session_state.ocr_date = ""
+
+if "ocr_raw_text" not in st.session_state:
+    st.session_state.ocr_raw_text = ""
+
+if "ocr_confidence" not in st.session_state:
+    st.session_state.ocr_confidence = 0.0
 
 
-# =========================================================
-# HEADER
-# =========================================================
+# ============================================================
+# ENCABEZADO
+# ============================================================
 
-st.markdown(
+header_html = dedent(
     """
     <div class="top-header">
         <div class="top-header-inner">
@@ -742,164 +713,213 @@ st.markdown(
             </div>
         </div>
     </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-# =========================================================
-# FORMULARIO
-# =========================================================
-
-st.markdown('<div class="cashier-shell">', unsafe_allow_html=True)
-
-st.markdown(
     """
-    <div class="utility-row">
-        <span class="back-pill">← Atrás</span>
-        <span class="balance-pill">Saldo&nbsp;&nbsp; USD $0.00</span>
-    </div>
-
-    <div class="section-title">REPORTAR UN DEPÓSITO</div>
-    """,
-    unsafe_allow_html=True,
-)
-
-account = st.selectbox(
-    "Selecciona la cuenta donde depositaste",
-    options=DEPOSIT_ACCOUNTS,
-)
-
-uploaded_file = st.file_uploader(
-    "Sube el comprobante del depósito",
-    type=["jpg", "jpeg", "png"],
-    help="Tamaño máximo recomendado: 3 MB.",
-)
-
-if uploaded_file is not None:
-    file_bytes = uploaded_file.getvalue()
-    current_file_id = get_file_id(file_bytes)
-
-    if st.session_state.current_file_id != current_file_id:
-        st.session_state.current_file_id = current_file_id
-        st.session_state.deposit_submitted = False
-
-        with st.spinner(
-            "Leyendo la información del comprobante..."
-        ):
-            try:
-                st.session_state.ocr_data = process_receipt(
-                    file_bytes
-                )
-
-            except Exception as exc:
-                st.session_state.ocr_data = {
-                    "amount": "",
-                    "reference": "",
-                    "date": "",
-                    "raw_text": "",
-                    "confidence": 0.0,
-                }
-
-                st.error(
-                    "No fue posible procesar el comprobante."
-                )
-
-                with st.expander(
-                    "Ver detalle técnico"
-                ):
-                    st.exception(exc)
-
-    confidence = (
-        st.session_state.ocr_data["confidence"] * 100
-    )
-
-    st.markdown(
-        f"""
-        <div class="ocr-message">
-            El comprobante fue procesado automáticamente.
-            Revisa y corrige los campos antes de reportar el depósito.
-            <br>
-            <strong>Confianza promedio OCR:</strong>
-            {confidence:.1f}%
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-amount = st.text_input(
-    "Monto depositado",
-    value=st.session_state.ocr_data["amount"],
-    placeholder="USD 0.00",
-    help="Monto mínimo: USD 10.00. Monto máximo: USD 20,000.00.",
-)
-
-reference = st.text_input(
-    "Ingresa el número de referencia",
-    value=st.session_state.ocr_data["reference"],
-    placeholder="Número de referencia",
-)
-
-deposit_date = st.text_input(
-    "Selecciona la fecha del depósito",
-    value=st.session_state.ocr_data["date"],
-    placeholder="DD / MM / YYYY",
-)
-
-if uploaded_file is None:
-    st.markdown(
-        '<div class="required-message">'
-        "Este documento es obligatorio"
-        "</div>",
-        unsafe_allow_html=True,
-    )
-
-parsed_amount = parse_amount(amount)
-
-required_fields_complete = all(
-    [
-        uploaded_file is not None,
-        parsed_amount is not None,
-        parsed_amount >= 10,
-        bool(clean_text(reference)),
-        bool(clean_text(deposit_date)),
-    ]
-)
-
-if parsed_amount is not None and parsed_amount < 10:
-    st.warning(
-        "El monto mínimo permitido es USD 10.00."
-    )
-
-if parsed_amount is not None and parsed_amount > 20000:
-    st.warning(
-        "El monto máximo permitido es USD 20,000.00."
-    )
-    required_fields_complete = False
-
-submit_button = st.button(
-    "Reportar depósito",
-    type="primary",
-    disabled=not required_fields_complete,
-    use_container_width=True,
-)
+).strip()
 
 st.markdown(
-    '<div class="cancel-link">Cancelar</div>',
+    header_html,
     unsafe_allow_html=True,
 )
 
-st.markdown("</div>", unsafe_allow_html=True)
+
+# ============================================================
+# CONTENIDO PRINCIPAL
+# ============================================================
+
+st.markdown(
+    dedent(
+        """
+        <div class="cashier-shell">
+            <div class="utility-row">
+                <span class="back-pill">← Atrás</span>
+                <span class="balance-pill">Saldo&nbsp;&nbsp; USD $0.00</span>
+            </div>
+
+            <div class="section-title">REPORTAR UN DEPÓSITO</div>
+        </div>
+        """
+    ).strip(),
+    unsafe_allow_html=True,
+)
 
 
-# =========================================================
+# Mantener los componentes de Streamlit centrados y con ancho similar.
+left_space, form_column, right_space = st.columns(
+    [1, 2.2, 1]
+)
+
+with form_column:
+    account = st.selectbox(
+        "Selecciona la cuenta donde depositaste",
+        options=DEPOSIT_ACCOUNTS,
+        key="deposit_account",
+    )
+
+    uploaded_file = st.file_uploader(
+        "Sube el comprobante del depósito",
+        type=["jpg", "jpeg", "png"],
+        help="Tamaño máximo recomendado: 3 MB.",
+        key="receipt_uploader",
+    )
+
+    if uploaded_file is not None:
+        file_bytes = uploaded_file.getvalue()
+        current_file_id = get_file_id(file_bytes)
+
+        if st.session_state.current_file_id != current_file_id:
+            st.session_state.current_file_id = current_file_id
+
+            with st.spinner(
+                "Leyendo la información del comprobante..."
+            ):
+                try:
+                    ocr_result = process_receipt(file_bytes)
+
+                    st.session_state.ocr_amount = (
+                        ocr_result["amount"]
+                    )
+
+                    st.session_state.ocr_reference = (
+                        ocr_result["reference"]
+                    )
+
+                    st.session_state.ocr_date = (
+                        ocr_result["date"]
+                    )
+
+                    st.session_state.ocr_raw_text = (
+                        ocr_result["raw_text"]
+                    )
+
+                    st.session_state.ocr_confidence = (
+                        ocr_result["confidence"]
+                    )
+
+                except Exception as exc:
+                    st.session_state.ocr_amount = ""
+                    st.session_state.ocr_reference = ""
+                    st.session_state.ocr_date = ""
+                    st.session_state.ocr_raw_text = ""
+                    st.session_state.ocr_confidence = 0.0
+
+                    st.error(
+                        "No fue posible procesar el comprobante."
+                    )
+
+                    with st.expander(
+                        "Ver detalle técnico"
+                    ):
+                        st.exception(exc)
+
+        confidence_percentage = (
+            st.session_state.ocr_confidence * 100
+        )
+
+        st.markdown(
+            dedent(
+                f"""
+                <div class="ocr-message">
+                    El comprobante fue procesado automáticamente.
+                    Revisa y corrige los datos antes de reportar
+                    el depósito.
+                    <br>
+                    <strong>Confianza promedio del OCR:</strong>
+                    {confidence_percentage:.1f}%
+                </div>
+                """
+            ).strip(),
+            unsafe_allow_html=True,
+        )
+
+    amount = st.text_input(
+        "Monto depositado",
+        value=st.session_state.ocr_amount,
+        placeholder="USD 0.00",
+        help=(
+            "Monto mínimo: USD 10.00. "
+            "Monto máximo: USD 20,000.00."
+        ),
+        key=f"amount_{st.session_state.current_file_id}",
+    )
+
+    reference = st.text_input(
+        "Ingresa el número de referencia",
+        value=st.session_state.ocr_reference,
+        placeholder="Número de referencia",
+        key=f"reference_{st.session_state.current_file_id}",
+    )
+
+    deposit_date = st.text_input(
+        "Selecciona la fecha del depósito",
+        value=st.session_state.ocr_date,
+        placeholder="DD / MM / YYYY",
+        key=f"date_{st.session_state.current_file_id}",
+    )
+
+    if uploaded_file is None:
+        st.markdown(
+            (
+                '<div class="required-message">'
+                "Este documento es obligatorio"
+                "</div>"
+            ),
+            unsafe_allow_html=True,
+        )
+
+    parsed_amount = parse_amount(amount)
+
+    amount_is_valid = (
+        parsed_amount is not None
+        and 10 <= parsed_amount <= 20000
+    )
+
+    reference_is_valid = bool(
+        clean_text(reference)
+    )
+
+    date_is_valid = bool(
+        clean_text(deposit_date)
+    )
+
+    file_is_valid = uploaded_file is not None
+
+    required_fields_complete = (
+        file_is_valid
+        and amount_is_valid
+        and reference_is_valid
+        and date_is_valid
+    )
+
+    if parsed_amount is not None:
+        if parsed_amount < 10:
+            st.warning(
+                "El monto mínimo permitido es USD 10.00."
+            )
+
+        elif parsed_amount > 20000:
+            st.warning(
+                "El monto máximo permitido es USD 20,000.00."
+            )
+
+    submit_button = st.button(
+        "Reportar depósito",
+        type="primary",
+        disabled=not required_fields_complete,
+        use_container_width=True,
+    )
+
+    st.markdown(
+        '<div class="cancel-link">Cancelar</div>',
+        unsafe_allow_html=True,
+    )
+
+
+# ============================================================
 # RESULTADO
-# =========================================================
+# ============================================================
 
-if submit_button:
-    st.session_state.deposit_submitted = True
-
-    deposit_result = {
+if submit_button and uploaded_file is not None:
+    result = {
         "account": account,
         "amount": parsed_amount,
         "currency": "USD",
@@ -907,7 +927,7 @@ if submit_button:
         "deposit_date": clean_text(deposit_date),
         "receipt_file": uploaded_file.name,
         "ocr_confidence": round(
-            st.session_state.ocr_data["confidence"],
+            st.session_state.ocr_confidence,
             4,
         ),
         "reported_at": datetime.now().isoformat(
@@ -922,7 +942,7 @@ if submit_button:
     with st.expander(
         "Ver resultado del prototipo"
     ):
-        st.json(deposit_result)
+        st.json(result)
 
 
 if uploaded_file is not None:
@@ -941,7 +961,7 @@ if uploaded_file is not None:
         with text_column:
             st.text_area(
                 "Texto detectado",
-                value=st.session_state.ocr_data["raw_text"],
+                value=st.session_state.ocr_raw_text,
                 height=350,
                 disabled=True,
             )
