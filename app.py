@@ -7,7 +7,7 @@ from typing import Any
 import easyocr
 import numpy as np
 import streamlit as st
-from PIL import Image, ImageEnhance, ImageFilter
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 
 # ============================================================
@@ -915,6 +915,188 @@ def extract_reference_from_items(
     return extract_reference(reconstructed_text) or extract_reference(raw_text)
 
 
+REFERENCE_KEYWORDS = (
+    "confirmacion",
+    "referencia",
+    "numero de referencia",
+    "numero de operacion",
+    "transaccion",
+    "operacion",
+)
+
+
+def find_reference_label(
+    detected_items: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Localiza la etiqueta de referencia y conserva sus coordenadas."""
+    positioned_items = build_positioned_items(detected_items)
+
+    for item in positioned_items:
+        normalized_text = normalize_search_text(item["text"])
+
+        if any(
+            keyword in normalized_text
+            for keyword in REFERENCE_KEYWORDS
+        ):
+            return item
+
+    return None
+
+
+def prepare_reference_variants(
+    reference_region: Image.Image,
+) -> list[Image.Image]:
+    """Genera varias versiones ampliadas de la zona de referencia."""
+    if reference_region.width <= 0 or reference_region.height <= 0:
+        return []
+
+    enlarged = reference_region.resize(
+        (
+            reference_region.width * 4,
+            reference_region.height * 4,
+        ),
+        Image.Resampling.LANCZOS,
+    )
+
+    grayscale = ImageOps.grayscale(enlarged)
+    autocontrast = ImageOps.autocontrast(grayscale, cutoff=1)
+    high_contrast = ImageEnhance.Contrast(autocontrast).enhance(2.0)
+    sharpened = high_contrast.filter(
+        ImageFilter.UnsharpMask(radius=2, percent=180, threshold=2)
+    )
+
+    threshold_135 = sharpened.point(
+        lambda pixel: 255 if pixel > 135 else 0
+    )
+    threshold_165 = sharpened.point(
+        lambda pixel: 255 if pixel > 165 else 0
+    )
+    threshold_195 = sharpened.point(
+        lambda pixel: 255 if pixel > 195 else 0
+    )
+
+    return [
+        enlarged,
+        grayscale,
+        autocontrast,
+        high_contrast,
+        sharpened,
+        threshold_135,
+        threshold_165,
+        threshold_195,
+    ]
+
+
+def extract_digits(value: Any) -> str:
+    """Conserva únicamente los dígitos de una posible referencia."""
+    return re.sub(r"\D", "", clean_text(value))
+
+
+def reread_reference_region(
+    processed_image: Image.Image,
+    detected_items: list[dict[str, Any]],
+    reader: easyocr.Reader,
+) -> dict[str, Any] | None:
+    """
+    Recorta la zona inmediatamente debajo de Confirmación/Referencia
+    y ejecuta una segunda lectura restringida exclusivamente a números.
+    """
+    label = find_reference_label(detected_items)
+
+    if label is None:
+        return None
+
+    image_width, image_height = processed_image.size
+
+    # La referencia suele aparecer justo debajo de la etiqueta. El recorte
+    # se mantiene deliberadamente estrecho para evitar capturar números del
+    # pie de página u otras secciones del comprobante.
+    x1 = max(int(label["x_min"]) - 20, 0)
+    x2 = min(
+        max(int(label["x_max"]) + 260, x1 + 260),
+        image_width,
+    )
+    y1 = max(int(label["y_max"]) - 5, 0)
+    y2 = min(int(label["y_max"]) + 105, image_height)
+
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    reference_region = processed_image.crop((x1, y1, x2, y2))
+    variants = prepare_reference_variants(reference_region)
+    candidates: list[dict[str, Any]] = []
+
+    for variant_index, variant in enumerate(variants):
+        second_pass_results = reader.readtext(
+            np.array(variant),
+            detail=1,
+            paragraph=False,
+            decoder="beamsearch",
+            allowlist="0123456789#",
+            text_threshold=0.25,
+            low_text=0.15,
+            link_threshold=0.20,
+            contrast_ths=0.05,
+            adjust_contrast=0.7,
+            mag_ratio=1.5,
+        )
+
+        ordered_results = sorted(
+            second_pass_results,
+            key=lambda result: min(point[0] for point in result[0]),
+        )
+
+        for _, detected_text, confidence in ordered_results:
+            digits = extract_digits(detected_text)
+
+            if 5 <= len(digits) <= 25:
+                candidates.append(
+                    {
+                        "reference": digits,
+                        "confidence": float(confidence),
+                        "variant": variant_index,
+                    }
+                )
+
+        combined_digits = "".join(
+            extract_digits(detected_text)
+            for _, detected_text, _ in ordered_results
+        )
+        combined_confidences = [
+            float(confidence)
+            for _, detected_text, confidence in ordered_results
+            if extract_digits(detected_text)
+        ]
+
+        if (
+            5 <= len(combined_digits) <= 25
+            and combined_confidences
+        ):
+            candidates.append(
+                {
+                    "reference": combined_digits,
+                    "confidence": (
+                        sum(combined_confidences)
+                        / len(combined_confidences)
+                    ),
+                    "variant": variant_index,
+                }
+            )
+
+    if not candidates:
+        return None
+
+    # El segundo análisis busca recuperar dígitos omitidos. Por eso se
+    # prioriza el candidato más largo y, en empate, el de mayor confianza.
+    return max(
+        candidates,
+        key=lambda candidate: (
+            len(candidate["reference"]),
+            candidate["confidence"],
+        ),
+    )
+
+
 # ============================================================
 # PROCESAMIENTO DE IMAGEN
 # ============================================================
@@ -1001,6 +1183,28 @@ def process_receipt(file_bytes: bytes) -> dict[str, Any]:
         else 0.0
     )
 
+    regular_reference = extract_reference_from_items(
+        detected_items,
+        raw_text,
+    )
+
+    reference_second_pass = reread_reference_region(
+        processed_image=processed_image,
+        detected_items=detected_items,
+        reader=reader,
+    )
+
+    final_reference = regular_reference
+
+    if reference_second_pass:
+        second_pass_value = reference_second_pass["reference"]
+
+        # La segunda lectura solo reemplaza la primera cuando recupera
+        # una referencia con más dígitos. Así se evita degradar un valor
+        # que ya fue reconocido correctamente en el análisis general.
+        if len(second_pass_value) > len(regular_reference):
+            final_reference = second_pass_value
+
     return {
         "raw_text": raw_text,
         "amount": format_amount(amounts["amount"]),
@@ -1008,10 +1212,7 @@ def process_receipt(file_bytes: bytes) -> dict[str, Any]:
         "amount_corrected": bool(amounts["amount_corrected"]),
         "amount_warning": amounts["amount_warning"],
         "amount_confidence": float(amounts["amount_confidence"]),
-        "reference": extract_reference_from_items(
-            detected_items,
-            raw_text,
-        ),
+        "reference": final_reference,
         "date": extract_date(raw_text),
         "confidence": average_confidence,
     }
