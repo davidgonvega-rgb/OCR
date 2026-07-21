@@ -713,8 +713,92 @@ def extract_amounts(
 # REFERENCIA
 # ============================================================
 
+def normalize_search_text(value: Any) -> str:
+    """Normaliza texto para comparaciones tolerantes a acentos."""
+    import unicodedata
+
+    normalized = clean_text(value).lower()
+    normalized = "".join(
+        character
+        for character in unicodedata.normalize("NFD", normalized)
+        if unicodedata.category(character) != "Mn"
+    )
+    return normalized
+
+
+def clean_reference_candidate(value: Any) -> str:
+    """Conserva únicamente caracteres válidos de una referencia."""
+    candidate = clean_text(value).upper().replace("#", "")
+    return re.sub(r"[^A-Z0-9-]", "", candidate)
+
+
+def build_positioned_items(
+    detected_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Agrega límites y centros geométricos a cada bloque OCR."""
+    positioned: list[dict[str, Any]] = []
+
+    for item in detected_items:
+        box = item.get("box")
+        text = clean_text(item.get("text"))
+
+        if not box or not text:
+            continue
+
+        x_values = [float(point[0]) for point in box]
+        y_values = [float(point[1]) for point in box]
+
+        positioned.append(
+            {
+                **item,
+                "text": text,
+                "x_min": min(x_values),
+                "x_max": max(x_values),
+                "y_min": min(y_values),
+                "y_max": max(y_values),
+                "x_center": sum(x_values) / len(x_values),
+                "y_center": sum(y_values) / len(y_values),
+            }
+        )
+
+    return positioned
+
+
+def group_items_into_lines(
+    items: list[dict[str, Any]],
+    vertical_tolerance: float = 24.0,
+) -> list[list[dict[str, Any]]]:
+    """Agrupa fragmentos OCR que pertenecen a la misma línea."""
+    lines: list[list[dict[str, Any]]] = []
+
+    for item in sorted(
+        items,
+        key=lambda current: (current["y_center"], current["x_min"]),
+    ):
+        selected_line: list[dict[str, Any]] | None = None
+
+        for line in lines:
+            average_y = sum(
+                current["y_center"] for current in line
+            ) / len(line)
+
+            if abs(item["y_center"] - average_y) <= vertical_tolerance:
+                selected_line = line
+                break
+
+        if selected_line is None:
+            lines.append([item])
+        else:
+            selected_line.append(item)
+
+    for line in lines:
+        line.sort(key=lambda current: current["x_min"])
+
+    return lines
+
+
 def extract_reference(text: str) -> str:
-    """Extrae confirmación, referencia o número de operación."""
+    """Extractor de respaldo basado únicamente en texto."""
     patterns = [
         r"(?:confirmaci[oó]n|referencia|"
         r"n[uú]mero\s+de\s+referencia|"
@@ -722,7 +806,6 @@ def extract_reference(text: str) -> str:
         r"n[uú]mero\s+de\s+operaci[oó]n|"
         r"operaci[oó]n)"
         r"\s*[:#-]?\s*([A-Z0-9\-]{5,})",
-
         r"#\s*([A-Z0-9\-]{5,})",
     ]
 
@@ -730,9 +813,106 @@ def extract_reference(text: str) -> str:
         match = re.search(pattern, text, re.IGNORECASE)
 
         if match:
-            return clean_text(match.group(1)).replace("#", "")
+            return clean_reference_candidate(match.group(1))
 
     return ""
+
+
+def extract_reference_from_items(
+    detected_items: list[dict[str, Any]],
+    raw_text: str,
+) -> str:
+    """
+    Extrae la referencia usando texto y posición. Une fragmentos que
+    EasyOCR haya separado, por ejemplo ``1815312`` + ``714``.
+    """
+    positioned_items = build_positioned_items(detected_items)
+    lines = group_items_into_lines(positioned_items)
+
+    keywords = (
+        "confirmacion",
+        "referencia",
+        "numero de referencia",
+        "numero de operacion",
+        "transaccion",
+        "operacion",
+    )
+
+    for line_index, line in enumerate(lines):
+        line_text = " ".join(item["text"] for item in line)
+        normalized_line = normalize_search_text(line_text)
+
+        if not any(keyword in normalized_line for keyword in keywords):
+            continue
+
+        label_items = [
+            item
+            for item in line
+            if any(
+                keyword in normalize_search_text(item["text"])
+                for keyword in keywords
+            )
+        ]
+        label_x_max = max(
+            (item["x_max"] for item in label_items),
+            default=min(item["x_min"] for item in line),
+        )
+
+        same_line_parts: list[str] = []
+        for item in line:
+            candidate = clean_reference_candidate(item["text"])
+            item_is_label = any(
+                keyword in normalize_search_text(item["text"])
+                for keyword in keywords
+            )
+
+            if (
+                not item_is_label
+                and item["x_min"] >= label_x_max - 10
+                and re.search(r"\d", candidate)
+            ):
+                same_line_parts.append(candidate)
+
+        combined_same_line = "".join(same_line_parts)
+        if len(combined_same_line) >= 5:
+            return combined_same_line
+
+        # En muchos comprobantes la etiqueta aparece en una línea y
+        # la referencia inmediatamente debajo. Se revisan hasta dos
+        # líneas cercanas para recuperar números divididos en bloques.
+        below_parts: list[str] = []
+        label_bottom = max(item["y_max"] for item in line)
+
+        for next_line in lines[line_index + 1 : line_index + 3]:
+            next_top = min(item["y_min"] for item in next_line)
+            vertical_gap = next_top - label_bottom
+
+            if vertical_gap < -15 or vertical_gap > 120:
+                continue
+
+            for item in next_line:
+                candidate = clean_reference_candidate(item["text"])
+
+                if (
+                    candidate
+                    and re.fullmatch(r"[A-Z0-9-]+", candidate)
+                    and re.search(r"\d", candidate)
+                ):
+                    below_parts.append(candidate)
+
+            if below_parts:
+                combined_below = "".join(below_parts)
+
+                if len(combined_below) >= 5:
+                    return combined_below
+
+    # Reconstruye líneas completas antes del respaldo tradicional.
+    reconstructed_text = "\n".join(
+        " ".join(item["text"] for item in line)
+        for line in lines
+    )
+
+    return extract_reference(reconstructed_text) or extract_reference(raw_text)
 
 
 # ============================================================
@@ -828,7 +1008,10 @@ def process_receipt(file_bytes: bytes) -> dict[str, Any]:
         "amount_corrected": bool(amounts["amount_corrected"]),
         "amount_warning": amounts["amount_warning"],
         "amount_confidence": float(amounts["amount_confidence"]),
-        "reference": extract_reference(raw_text),
+        "reference": extract_reference_from_items(
+            detected_items,
+            raw_text,
+        ),
         "date": extract_date(raw_text),
         "confidence": average_confidence,
     }
