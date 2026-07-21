@@ -1,5 +1,6 @@
 import hashlib
 import re
+from difflib import SequenceMatcher
 from datetime import datetime
 from io import BytesIO
 from typing import Any
@@ -992,6 +993,90 @@ def extract_digits(value: Any) -> str:
     return re.sub(r"\D", "", clean_text(value))
 
 
+def reference_similarity(value_a: Any, value_b: Any) -> float:
+    """Calcula la similitud entre dos lecturas OCR de una referencia."""
+    digits_a = extract_digits(value_a)
+    digits_b = extract_digits(value_b)
+
+    if not digits_a or not digits_b:
+        return 0.0
+
+    return SequenceMatcher(None, digits_a, digits_b).ratio()
+
+
+def normalize_reference_length(
+    second_pass_reference: Any,
+    first_pass_reference: Any = "",
+    expected_length: int = 10,
+) -> str:
+    """
+    Elimina dígitos falsos agregados alrededor de una referencia.
+
+    EasyOCR puede interpretar el símbolo ``#`` como ``8`` y también
+    capturar un carácter cercano al final. Cuando la segunda lectura
+    contiene más dígitos de los esperados, se generan todas las ventanas
+    posibles y se selecciona la más parecida a la primera lectura OCR.
+
+    Ejemplo:
+        segunda lectura: 818153127145
+        primera lectura: 181531214
+        resultado:        1815312714
+    """
+    second_pass = extract_digits(second_pass_reference)
+    first_pass = extract_digits(first_pass_reference)
+
+    if expected_length <= 0:
+        return first_pass or second_pass
+
+    if not second_pass:
+        return first_pass
+
+    if len(second_pass) == expected_length:
+        return second_pass
+
+    if len(second_pass) < expected_length:
+        if len(first_pass) == expected_length:
+            return first_pass
+
+        return (
+            second_pass
+            if len(second_pass) >= len(first_pass)
+            else first_pass
+        )
+
+    windows = [
+        second_pass[index:index + expected_length]
+        for index in range(
+            len(second_pass) - expected_length + 1
+        )
+    ]
+
+    if not windows:
+        return first_pass or second_pass
+
+    if first_pass:
+        return max(
+            windows,
+            key=lambda candidate: (
+                reference_similarity(candidate, first_pass),
+                -abs(
+                    (second_pass.find(candidate) + expected_length / 2)
+                    - len(second_pass) / 2
+                ),
+            ),
+        )
+
+    # Sin una primera lectura útil, se escoge la ventana más centrada.
+    # Esto evita favorecer el falso 8 que suele producir el símbolo #.
+    return min(
+        windows,
+        key=lambda candidate: abs(
+            (second_pass.find(candidate) + expected_length / 2)
+            - len(second_pass) / 2
+        ),
+    )
+
+
 def select_reference_candidate(
     ocr_results: list,
 ) -> dict[str, Any] | None:
@@ -1273,16 +1358,19 @@ def process_receipt(file_bytes: bytes) -> dict[str, Any]:
         reader=reader,
     )
 
-    final_reference = regular_reference
+    final_reference = extract_digits(regular_reference)
 
     if reference_second_pass:
         second_pass_value = reference_second_pass["reference"]
 
-        # La segunda lectura solo reemplaza la primera cuando recupera
-        # una referencia con más dígitos. Así se evita degradar un valor
-        # que ya fue reconocido correctamente en el análisis general.
-        if len(second_pass_value) > len(regular_reference):
-            final_reference = second_pass_value
+        # Para este formato bancario la referencia esperada contiene
+        # 10 dígitos. La normalización elimina caracteres falsos alrededor
+        # del valor, como el 8 producido cuando OCR confunde el símbolo #.
+        final_reference = normalize_reference_length(
+            second_pass_reference=second_pass_value,
+            first_pass_reference=regular_reference,
+            expected_length=10,
+        )
 
     return {
         "raw_text": raw_text,
