@@ -487,18 +487,106 @@ def extract_date(text: str) -> str:
 # EXTRACCIÓN DE MONTOS
 # ============================================================
 
-def extract_amounts(text: str) -> dict[str, float | None]:
+def get_candidate_confidence(
+    candidate_text: str,
+    detected_items: list[dict[str, Any]],
+) -> float:
+    """Obtiene la confianza OCR del elemento que contiene el monto."""
+    compact_candidate = re.sub(r"\s+", "", candidate_text)
+
+    matching_confidences: list[float] = []
+
+    for item in detected_items:
+        item_text = re.sub(r"\s+", "", clean_text(item.get("text")))
+
+        if compact_candidate and compact_candidate in item_text:
+            matching_confidences.append(
+                float(item.get("confidence", 0.0))
+            )
+
+    return (
+        max(matching_confidences)
+        if matching_confidences
+        else 0.0
+    )
+
+
+def correct_possible_dollar_as_eight(
+    candidate_text: str,
+    confidence: float,
+) -> dict[str, Any]:
     """
-    Identifica monto transferido, comisión, impuesto y total
-    utilizando las palabras cercanas a cada valor.
+    Detecta el error frecuente en el que EasyOCR interpreta '$62.50'
+    como '862.50'. La corrección solo se aplica a candidatos ubicados
+    en el contexto de monto y con confianza OCR menor al umbral.
+    """
+    compact = re.sub(r"\s+", "", clean_text(candidate_text))
+    regular_amount = parse_amount(compact)
+
+    result: dict[str, Any] = {
+        "amount": regular_amount,
+        "corrected": False,
+        "original_amount": regular_amount,
+        "warning": "",
+    }
+
+    # Debe comenzar con 8 y terminar con exactamente dos decimales.
+    possible_symbol_error = re.fullmatch(
+        r"8\d+(?:[.,]\d{3})*[.,]\d{2}",
+        compact,
+    )
+
+    if not possible_symbol_error:
+        return result
+
+    corrected_text = compact[1:]
+    corrected_amount = parse_amount(corrected_text)
+
+    # Evita correcciones fuera del rango admitido por el formulario.
+    corrected_is_plausible = (
+        corrected_amount is not None
+        and 10 <= corrected_amount <= 20000
+    )
+
+    # Un umbral conservador reduce el riesgo de modificar un 8 real.
+    if corrected_is_plausible and confidence < 0.90:
+        result.update(
+            {
+                "amount": corrected_amount,
+                "corrected": True,
+                "original_amount": regular_amount,
+                "warning": (
+                    "EasyOCR pudo interpretar el símbolo $ como el "
+                    "número 8. El monto fue corregido automáticamente, "
+                    "pero debe revisarse antes de continuar."
+                ),
+            }
+        )
+
+    return result
+
+
+def extract_amounts(
+    text: str,
+    detected_items: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """
+    Identifica monto transferido, comisión, impuesto y total usando
+    palabras cercanas. Además, corrige de forma controlada el error
+    '$' -> '8' de EasyOCR.
     """
     normalized = clean_text(text)
+    detected_items = detected_items or []
 
-    result: dict[str, float | None] = {
+    result: dict[str, Any] = {
         "amount": None,
         "commission": None,
         "tax": None,
         "total": None,
+        "amount_corrected": False,
+        "original_amount": None,
+        "amount_warning": "",
+        "amount_confidence": 0.0,
     }
 
     number_pattern = r"([\d.,]+)"
@@ -524,10 +612,22 @@ def extract_amounts(text: str) -> dict[str, float | None]:
         match = re.search(pattern, normalized, re.IGNORECASE)
 
         if match:
-            candidate = parse_amount(match.group(1))
+            raw_candidate = match.group(1)
+            candidate_confidence = get_candidate_confidence(
+                raw_candidate,
+                detected_items,
+            )
+            candidate_result = correct_possible_dollar_as_eight(
+                raw_candidate,
+                candidate_confidence,
+            )
 
-            if candidate is not None:
-                result["amount"] = candidate
+            if candidate_result["amount"] is not None:
+                result["amount"] = candidate_result["amount"]
+                result["amount_corrected"] = candidate_result["corrected"]
+                result["original_amount"] = candidate_result["original_amount"]
+                result["amount_warning"] = candidate_result["warning"]
+                result["amount_confidence"] = candidate_confidence
                 break
 
     commission_match = re.search(
@@ -600,10 +700,11 @@ def extract_amounts(text: str) -> dict[str, float | None]:
             if amount not in excluded_values
         ]
 
-        if candidates:
-            result["amount"] = max(candidates)
-        else:
-            result["amount"] = max(parsed_candidates)
+        result["amount"] = (
+            max(candidates)
+            if candidates
+            else max(parsed_candidates)
+        )
 
     return result
 
@@ -686,20 +787,33 @@ def process_receipt(file_bytes: bytes) -> dict[str, Any]:
         np.array(processed_image),
         detail=1,
         paragraph=False,
+        decoder="beamsearch",
     )
 
     detected_lines: list[str] = []
+    detected_items: list[dict[str, Any]] = []
     confidences: list[float] = []
 
-    for _, detected_text, confidence in results:
+    for box, detected_text, confidence in results:
         detected_text = clean_text(detected_text)
 
         if detected_text:
+            numeric_confidence = float(confidence)
             detected_lines.append(detected_text)
-            confidences.append(float(confidence))
+            confidences.append(numeric_confidence)
+            detected_items.append(
+                {
+                    "box": box,
+                    "text": detected_text,
+                    "confidence": numeric_confidence,
+                }
+            )
 
     raw_text = "\n".join(detected_lines)
-    amounts = extract_amounts(raw_text)
+    amounts = extract_amounts(
+        raw_text,
+        detected_items=detected_items,
+    )
 
     average_confidence = (
         sum(confidences) / len(confidences)
@@ -710,6 +824,10 @@ def process_receipt(file_bytes: bytes) -> dict[str, Any]:
     return {
         "raw_text": raw_text,
         "amount": format_amount(amounts["amount"]),
+        "original_amount": format_amount(amounts["original_amount"]),
+        "amount_corrected": bool(amounts["amount_corrected"]),
+        "amount_warning": amounts["amount_warning"],
+        "amount_confidence": float(amounts["amount_confidence"]),
         "reference": extract_reference(raw_text),
         "date": extract_date(raw_text),
         "confidence": average_confidence,
@@ -722,6 +840,10 @@ def process_receipt(file_bytes: bytes) -> dict[str, Any]:
 
 DEFAULT_OCR_DATA = {
     "amount": "",
+    "original_amount": "",
+    "amount_corrected": False,
+    "amount_warning": "",
+    "amount_confidence": 0.0,
     "reference": "",
     "date": "",
     "raw_text": "",
@@ -832,18 +954,11 @@ with form_column:
                     ):
                         st.exception(exc)
 
-        confidence_percentage = (
-            st.session_state.ocr_data["confidence"] * 100
-        )
-
         st.html(
-            f"""
+            """
 <div class="ocr-message">
     El comprobante fue procesado automáticamente.
     Revisa y corrige los datos antes de reportar el depósito.
-    <br>
-    <strong>Confianza promedio del OCR:</strong>
-    {confidence_percentage:.1f}%
 </div>
 """
         )
