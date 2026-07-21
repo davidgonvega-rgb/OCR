@@ -23,10 +23,8 @@ st.set_page_config(
 )
 
 DEPOSIT_ACCOUNTS = [
-    "MINOS S.A. - 02-4",
-    "Mercantil Banco - 030024",
-    "Banco General - 4589",
-    "BAC Credomatic - 7512",
+    "BLUEANT, S.A. C.V.-1166",
+    "Banco de Fomento Agropecuario-41-9",
 ]
 
 MONTHS_ES = {
@@ -1514,6 +1512,27 @@ with form_column:
 """
         )
 
+
+        with st.expander(
+            "Ver comprobante y texto detectado por OCR"
+        ):
+            preview_column, text_column = st.columns(2)
+
+            with preview_column:
+                st.image(
+                    uploaded_file,
+                    caption="Comprobante cargado",
+                    width="stretch",
+                )
+
+            with text_column:
+                st.text_area(
+                    "Texto detectado",
+                    value=st.session_state.ocr_data["raw_text"],
+                    height=350,
+                    disabled=True,
+                )
+
     amount_widget_key = (
         f"amount_{st.session_state.current_file_id or 'empty'}"
     )
@@ -1640,29 +1659,3 @@ if submit_button and uploaded_file is not None:
         "Ver resultado del prototipo"
     ):
         st.json(result)
-
-
-# ============================================================
-# COMPROBANTE Y TEXTO OCR
-# ============================================================
-
-if uploaded_file is not None:
-    with st.expander(
-        "Ver comprobante y texto detectado por OCR"
-    ):
-        preview_column, text_column = st.columns(2)
-
-        with preview_column:
-            st.image(
-                uploaded_file,
-                caption="Comprobante cargado",
-                width="stretch",
-            )
-
-        with text_column:
-            st.text_area(
-                "Texto detectado",
-                value=st.session_state.ocr_data["raw_text"],
-                height=350,
-                disabled=True,
-            )
