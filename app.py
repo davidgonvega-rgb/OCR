@@ -992,6 +992,105 @@ def extract_digits(value: Any) -> str:
     return re.sub(r"\D", "", clean_text(value))
 
 
+def select_reference_candidate(
+    ocr_results: list,
+) -> dict[str, Any] | None:
+    """
+    Selecciona únicamente la primera línea numérica válida del recorte.
+
+    Los fragmentos que estén en la misma línea se unen de izquierda a
+    derecha, pero nunca se combinan números de líneas diferentes.
+    """
+    positioned: list[dict[str, Any]] = []
+
+    for box, detected_text, confidence in ocr_results:
+        digits = extract_digits(detected_text)
+
+        if not digits:
+            continue
+
+        x_values = [float(point[0]) for point in box]
+        y_values = [float(point[1]) for point in box]
+
+        positioned.append(
+            {
+                "digits": digits,
+                "confidence": float(confidence),
+                "x_min": min(x_values),
+                "y_min": min(y_values),
+                "y_max": max(y_values),
+                "y_center": sum(y_values) / len(y_values),
+            }
+        )
+
+    if not positioned:
+        return None
+
+    # Agrupa únicamente fragmentos que pertenecen a una misma línea.
+    lines: list[list[dict[str, Any]]] = []
+
+    for item in sorted(
+        positioned,
+        key=lambda current: (current["y_center"], current["x_min"]),
+    ):
+        selected_line: list[dict[str, Any]] | None = None
+
+        for line in lines:
+            average_y = sum(
+                current["y_center"] for current in line
+            ) / len(line)
+
+            # La imagen fue ampliada 4x, por eso se usa una tolerancia
+            # moderada para fragmentos de la misma referencia.
+            if abs(item["y_center"] - average_y) <= 35:
+                selected_line = line
+                break
+
+        if selected_line is None:
+            lines.append([item])
+        else:
+            selected_line.append(item)
+
+    line_candidates: list[dict[str, Any]] = []
+
+    for line in lines:
+        ordered_line = sorted(line, key=lambda current: current["x_min"])
+        reference = "".join(current["digits"] for current in ordered_line)
+
+        # Rango razonable para referencias bancarias.
+        if not 6 <= len(reference) <= 20:
+            continue
+
+        weighted_confidence = sum(
+            current["confidence"] * len(current["digits"])
+            for current in ordered_line
+        ) / max(len(reference), 1)
+
+        line_candidates.append(
+            {
+                "reference": reference,
+                "confidence": weighted_confidence,
+                "y_center": sum(
+                    current["y_center"] for current in ordered_line
+                ) / len(ordered_line),
+            }
+        )
+
+    if not line_candidates:
+        return None
+
+    # La referencia es la primera línea numérica inmediatamente debajo
+    # de la etiqueta Confirmación/Referencia.
+    line_candidates.sort(
+        key=lambda candidate: (
+            candidate["y_center"],
+            -candidate["confidence"],
+        )
+    )
+
+    return line_candidates[0]
+
+
 def reread_reference_region(
     processed_image: Image.Image,
     detected_items: list[dict[str, Any]],
@@ -1008,16 +1107,12 @@ def reread_reference_region(
 
     image_width, image_height = processed_image.size
 
-    # La referencia suele aparecer justo debajo de la etiqueta. El recorte
-    # se mantiene deliberadamente estrecho para evitar capturar números del
-    # pie de página u otras secciones del comprobante.
-    x1 = max(int(label["x_min"]) - 20, 0)
-    x2 = min(
-        max(int(label["x_max"]) + 260, x1 + 260),
-        image_width,
-    )
-    y1 = max(int(label["y_max"]) - 5, 0)
-    y2 = min(int(label["y_max"]) + 105, image_height)
+    # Recorte estrecho: evita capturar números del pie de página o de
+    # secciones vecinas.
+    x1 = max(int(label["x_min"]) - 15, 0)
+    x2 = min(int(label["x_max"]) + 260, image_width)
+    y1 = max(int(label["y_max"]) - 3, 0)
+    y2 = min(int(label["y_max"]) + 75, image_height)
 
     if x2 <= x1 or y2 <= y1:
         return None
@@ -1032,66 +1127,50 @@ def reread_reference_region(
             detail=1,
             paragraph=False,
             decoder="beamsearch",
-            allowlist="0123456789#",
-            text_threshold=0.25,
-            low_text=0.15,
-            link_threshold=0.20,
+            allowlist="0123456789",
+            text_threshold=0.35,
+            low_text=0.25,
+            link_threshold=0.25,
             contrast_ths=0.05,
             adjust_contrast=0.7,
-            mag_ratio=1.5,
+            mag_ratio=2.0,
         )
 
-        ordered_results = sorted(
-            second_pass_results,
-            key=lambda result: min(point[0] for point in result[0]),
+        selected_candidate = select_reference_candidate(
+            second_pass_results
         )
 
-        for _, detected_text, confidence in ordered_results:
-            digits = extract_digits(detected_text)
-
-            if 5 <= len(digits) <= 25:
-                candidates.append(
-                    {
-                        "reference": digits,
-                        "confidence": float(confidence),
-                        "variant": variant_index,
-                    }
-                )
-
-        combined_digits = "".join(
-            extract_digits(detected_text)
-            for _, detected_text, _ in ordered_results
-        )
-        combined_confidences = [
-            float(confidence)
-            for _, detected_text, confidence in ordered_results
-            if extract_digits(detected_text)
-        ]
-
-        if (
-            5 <= len(combined_digits) <= 25
-            and combined_confidences
-        ):
-            candidates.append(
-                {
-                    "reference": combined_digits,
-                    "confidence": (
-                        sum(combined_confidences)
-                        / len(combined_confidences)
-                    ),
-                    "variant": variant_index,
-                }
-            )
+        if selected_candidate:
+            selected_candidate["variant"] = variant_index
+            candidates.append(selected_candidate)
 
     if not candidates:
         return None
 
-    # El segundo análisis busca recuperar dígitos omitidos. Por eso se
-    # prioriza el candidato más largo y, en empate, el de mayor confianza.
+    # Favorece el valor reconocido de forma consistente por varias
+    # variantes de imagen, en lugar de escoger simplemente el más largo.
+    grouped: dict[str, list[dict[str, Any]]] = {}
+
+    for candidate in candidates:
+        grouped.setdefault(candidate["reference"], []).append(candidate)
+
+    ranked_candidates: list[dict[str, Any]] = []
+
+    for reference, matches in grouped.items():
+        ranked_candidates.append(
+            {
+                "reference": reference,
+                "votes": len(matches),
+                "confidence": sum(
+                    match["confidence"] for match in matches
+                ) / len(matches),
+            }
+        )
+
     return max(
-        candidates,
+        ranked_candidates,
         key=lambda candidate: (
-            len(candidate["reference"]),
+            candidate["votes"],
             candidate["confidence"],
         ),
     )
