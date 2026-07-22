@@ -1035,6 +1035,137 @@ def extract_reference_from_items(
     return extract_reference(reconstructed_text) or extract_reference(raw_text)
 
 
+
+def looks_like_label(value: Any, targets: tuple[str, ...], threshold: float = 0.66) -> bool:
+    """Detecta etiquetas aunque EasyOCR cambie una o dos letras."""
+    normalized = normalize_search_text(value)
+    if not normalized:
+        return False
+
+    compact = normalized.replace(" ", "")
+    for target in targets:
+        normalized_target = normalize_search_text(target)
+        compact_target = normalized_target.replace(" ", "")
+
+        if normalized_target in normalized or compact_target in compact:
+            return True
+
+        for token in normalized.split():
+            if SequenceMatcher(None, token, normalized_target).ratio() >= threshold:
+                return True
+
+        if SequenceMatcher(None, compact, compact_target).ratio() >= threshold:
+            return True
+
+    return False
+
+
+def extract_atm_amount_from_items(
+    detected_items: list[dict[str, Any]],
+) -> float | None:
+    """
+    Respaldo específico para recibos ATM de El Salvador.
+
+    Reconoce variaciones OCR como USD, USO, U5D y toma el decimal
+    ubicado en la misma línea o inmediatamente después.
+    """
+    positioned = build_positioned_items(detected_items)
+    lines = group_items_into_lines(positioned, vertical_tolerance=30.0)
+    amount_pattern = re.compile(r"(?<!\d)(\d{1,6}[.,]\d{2})(?!\d)")
+
+    for line_index, line in enumerate(lines):
+        line_text = " ".join(item["text"] for item in line)
+        normalized = normalize_search_text(line_text).upper()
+
+        currency_label_found = (
+            re.search(r"\bU[S5][D0O]\b", normalized) is not None
+            or looks_like_label(line_text, ("USD",), threshold=0.62)
+        )
+
+        if not currency_label_found:
+            continue
+
+        # Primero intenta extraer el decimal de la misma línea completa.
+        same_line_match = amount_pattern.search(line_text)
+        if same_line_match:
+            candidate = parse_amount(same_line_match.group(1))
+            if candidate is not None and 0 < candidate <= 20000:
+                return candidate
+
+        # Luego revisa cada bloque de la línea.
+        for item in line:
+            match = amount_pattern.search(item["text"])
+            if match:
+                candidate = parse_amount(match.group(1))
+                if candidate is not None and 0 < candidate <= 20000:
+                    return candidate
+
+        # Finalmente revisa hasta dos líneas inmediatamente inferiores.
+        label_bottom = max(item["y_max"] for item in line)
+        for next_line in lines[line_index + 1 : line_index + 3]:
+            next_top = min(item["y_min"] for item in next_line)
+            if next_top - label_bottom > 100:
+                break
+
+            next_text = " ".join(item["text"] for item in next_line)
+            match = amount_pattern.search(next_text)
+            if match:
+                candidate = parse_amount(match.group(1))
+                if candidate is not None and 0 < candidate <= 20000:
+                    return candidate
+
+    return None
+
+
+def extract_atm_reference_from_items(
+    detected_items: list[dict[str, Any]],
+) -> str:
+    """
+    Respaldo específico para recibos ATM donde REFERENCIA y el valor
+    pueden quedar dentro del mismo bloque OCR. Conserva ceros iniciales.
+    """
+    positioned = build_positioned_items(detected_items)
+    lines = group_items_into_lines(positioned, vertical_tolerance=30.0)
+    digits_pattern = re.compile(r"(?<!\d)(\d{5,25})(?!\d)")
+
+    for line_index, line in enumerate(lines):
+        line_text = " ".join(item["text"] for item in line)
+        is_reference_line = looks_like_label(
+            line_text,
+            ("referencia", "referencia atm", "ref"),
+            threshold=0.62,
+        )
+
+        if not is_reference_line:
+            continue
+
+        # Importante: analiza la línea completa, incluso cuando etiqueta y
+        # referencia fueron reconocidas como un único bloque.
+        matches = digits_pattern.findall(line_text)
+        if matches:
+            # La referencia suele ser el último grupo numérico de la línea.
+            return matches[-1]
+
+        # Revisa los bloques individuales por si EasyOCR separó el valor.
+        for item in reversed(line):
+            matches = digits_pattern.findall(item["text"])
+            if matches:
+                return matches[-1]
+
+        # Respaldo: valor inmediatamente debajo de la etiqueta.
+        label_bottom = max(item["y_max"] for item in line)
+        for next_line in lines[line_index + 1 : line_index + 3]:
+            next_top = min(item["y_min"] for item in next_line)
+            if next_top - label_bottom > 100:
+                break
+
+            next_text = " ".join(item["text"] for item in next_line)
+            matches = digits_pattern.findall(next_text)
+            if matches:
+                return matches[0]
+
+    return ""
+
 # ============================================================
 # PROCESAMIENTO DE IMAGEN
 # ============================================================
@@ -1115,6 +1246,13 @@ def process_receipt(file_bytes: bytes) -> dict[str, Any]:
         detected_items=detected_items,
     )
 
+    # Respaldo especializado para recibos ATM impresos de El Salvador.
+    if amounts["amount"] is None:
+        atm_amount = extract_atm_amount_from_items(detected_items)
+        if atm_amount is not None:
+            amounts["amount"] = atm_amount
+            amounts["original_amount"] = atm_amount
+
     average_confidence = (
         sum(confidences) / len(confidences)
         if confidences
@@ -1125,6 +1263,12 @@ def process_receipt(file_bytes: bytes) -> dict[str, Any]:
         detected_items,
         raw_text,
     )
+
+    # La etiqueta y el número pueden quedar dentro de un único bloque OCR.
+    # Este respaldo además tolera errores leves en la palabra REFERENCIA.
+    atm_reference = extract_atm_reference_from_items(detected_items)
+    if not final_reference and atm_reference:
+        final_reference = atm_reference
 
     return {
         "raw_text": raw_text,
