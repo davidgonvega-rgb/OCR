@@ -464,20 +464,72 @@ def normalize_date(value: str | None) -> str:
 
 
 def extract_date(text: str) -> str:
-    """Extrae una fecha del texto OCR."""
+    """
+    Extrae fechas de comprobantes digitales y recibos de ATM.
+
+    Formatos admitidos, entre otros:
+    - 21/07/2026
+    - 22/07/26
+    - 21 julio 2026
+    - 22 julio (se utiliza el año actual)
+    - Hoy (21 julio 2026)
+    """
+    normalized = clean_text(text).lower()
     month_pattern = "|".join(MONTHS_ES.keys())
 
-    patterns = [
-        rf"\b(\d{{1,2}}\s+(?:{month_pattern})\s+\d{{4}})\b",
-        r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b",
-        r"\b(\d{4}[/-]\d{1,2}[/-]\d{1,2})\b",
-    ]
+    # Prioriza fechas completas con mes escrito.
+    textual_with_year = re.search(
+        rf"\b(\d{{1,2}})\s+(?:de\s+)?({month_pattern})"
+        rf"(?:\s+de)?\s+(\d{{4}})\b",
+        normalized,
+        re.IGNORECASE,
+    )
 
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
+    if textual_with_year:
+        day = textual_with_year.group(1).zfill(2)
+        month = MONTHS_ES[textual_with_year.group(2).lower()]
+        year = textual_with_year.group(3)
+        return f"{day}/{month}/{year}"
 
-        if match:
-            return normalize_date(match.group(1))
+    # Fechas numéricas de recibos ATM y comprobantes móviles.
+    numeric_match = re.search(
+        r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b",
+        normalized,
+    )
+
+    if numeric_match:
+        day = numeric_match.group(1).zfill(2)
+        month = numeric_match.group(2).zfill(2)
+        year = numeric_match.group(3)
+
+        if len(year) == 2:
+            year = f"20{year}"
+
+        return f"{day}/{month}/{year}"
+
+    iso_match = re.search(
+        r"\b(\d{4})[/-](\d{1,2})[/-](\d{1,2})\b",
+        normalized,
+    )
+
+    if iso_match:
+        year = iso_match.group(1)
+        month = iso_match.group(2).zfill(2)
+        day = iso_match.group(3).zfill(2)
+        return f"{day}/{month}/{year}"
+
+    # Algunos bancos muestran únicamente "22 julio".
+    textual_without_year = re.search(
+        rf"\b(\d{{1,2}})\s+(?:de\s+)?({month_pattern})\b",
+        normalized,
+        re.IGNORECASE,
+    )
+
+    if textual_without_year:
+        day = textual_without_year.group(1).zfill(2)
+        month = MONTHS_ES[textual_without_year.group(2).lower()]
+        year = str(datetime.now().year)
+        return f"{day}/{month}/{year}"
 
     return ""
 
@@ -570,9 +622,15 @@ def extract_amounts(
     detected_items: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
-    Identifica monto transferido, comisión, impuesto y total usando
-    palabras cercanas. Además, corrige de forma controlada el error
-    '$' -> '8' de EasyOCR.
+    Extrae el monto de comprobantes de Panamá y El Salvador.
+
+    Reconoce etiquetas como:
+    - Transferiste
+    - Monto / Monto debitado
+    - USD
+    - Importe / Valor
+
+    También conserva la corrección controlada del error "$" -> "8".
     """
     normalized = clean_text(text)
     detected_items = detected_items or []
@@ -588,69 +646,66 @@ def extract_amounts(
         "amount_confidence": 0.0,
     }
 
-    number_pattern = r"([\d.,]+)"
+    number_pattern = r"([0-9]{1,3}(?:[.,][0-9]{3})*[.,][0-9]{2}|[0-9]+[.,][0-9]{2})"
 
+    # Ordenados desde las etiquetas más específicas hasta las genéricas.
     main_amount_patterns = [
+        rf"monto\s+debitado[\s:]*\$?\s*{number_pattern}",
+        rf"monto\s+(?:transferido|depositado|enviado|acreditado)"
+        rf"[\s:]*\$?\s*{number_pattern}",
         rf"(?:¡?listo!?[\s,:-]*)?transferiste"
         rf"[\s:]*\$?\s*{number_pattern}",
-
-        rf"monto\s+(?:transferido|depositado|enviado)"
-        rf"[\s:]*\$?\s*{number_pattern}",
-
         rf"importe\s+(?:transferido|depositado|enviado)"
         rf"[\s:]*\$?\s*{number_pattern}",
-
         rf"valor\s+(?:transferido|depositado|enviado)"
         rf"[\s:]*\$?\s*{number_pattern}",
-
-        rf"(?:monto|importe|valor)"
-        rf"[\s:]*\$?\s*{number_pattern}",
+        rf"(?:monto|importe|valor)[\s:]*\$?\s*{number_pattern}",
+        # Recibos de ATM de El Salvador: "USD : 10.00".
+        rf"\bUSD\b[\s:.-]*\$?\s*{number_pattern}",
     ]
 
     for pattern in main_amount_patterns:
         match = re.search(pattern, normalized, re.IGNORECASE)
 
-        if match:
-            raw_candidate = match.group(1)
-            candidate_confidence = get_candidate_confidence(
-                raw_candidate,
-                detected_items,
-            )
-            candidate_result = correct_possible_dollar_as_eight(
-                raw_candidate,
-                candidate_confidence,
-            )
+        if not match:
+            continue
 
-            if candidate_result["amount"] is not None:
-                result["amount"] = candidate_result["amount"]
-                result["amount_corrected"] = candidate_result["corrected"]
-                result["original_amount"] = candidate_result["original_amount"]
-                result["amount_warning"] = candidate_result["warning"]
-                result["amount_confidence"] = candidate_confidence
-                break
-
-    commission_match = re.search(
-        rf"comisi[oó]n[\s:()+-]*\$?\s*{number_pattern}",
-        normalized,
-        re.IGNORECASE,
-    )
-
-    if commission_match:
-        result["commission"] = parse_amount(
-            commission_match.group(1)
+        raw_candidate = match.group(1)
+        candidate_confidence = get_candidate_confidence(
+            raw_candidate,
+            detected_items,
+        )
+        candidate_result = correct_possible_dollar_as_eight(
+            raw_candidate,
+            candidate_confidence,
         )
 
-    tax_match = re.search(
-        rf"(?:ITBMS|IVA|impuesto)"
+        if candidate_result["amount"] is not None:
+            result["amount"] = candidate_result["amount"]
+            result["amount_corrected"] = candidate_result["corrected"]
+            result["original_amount"] = candidate_result["original_amount"]
+            result["amount_warning"] = candidate_result["warning"]
+            result["amount_confidence"] = candidate_confidence
+            break
+
+    commission_match = re.search(
+        rf"(?:comisi[oó]n|costo\s+de\s+la\s+transacci[oó]n)"
         rf"[\s:()+-]*\$?\s*{number_pattern}",
         normalized,
         re.IGNORECASE,
     )
 
+    if commission_match:
+        result["commission"] = parse_amount(commission_match.group(1))
+
+    tax_match = re.search(
+        rf"(?:ITBMS|IVA|impuesto)[\s:()+-]*\$?\s*{number_pattern}",
+        normalized,
+        re.IGNORECASE,
+    )
+
     if tax_match:
-        result["tax"] = parse_amount(
-            tax_match.group(1)
-        )
+        result["tax"] = parse_amount(tax_match.group(1))
 
     total_patterns = [
         rf"total\s+a\s+pagar[\s:]*\$?\s*{number_pattern}",
@@ -664,26 +719,22 @@ def extract_amounts(
 
         if match:
             candidate = parse_amount(match.group(1))
-
             if candidate is not None:
                 result["total"] = candidate
                 break
 
-    # Respaldo: toma montos acompañados por símbolos o monedas.
+    # Respaldo: valores acompañados por símbolo o moneda.
     currency_amounts = re.findall(
-        r"(?:\$|USD|US\$|DOP|CRC|PAB|MXN|GTQ|HNL|NIO|PEN|COP)"
-        r"\s*([\d.,]+)",
+        rf"(?:\$|USD|US\$|DOP|CRC|PAB|MXN|GTQ|HNL|NIO|PEN|COP)"
+        rf"\s*[:.-]?\s*{number_pattern}",
         normalized,
         re.IGNORECASE,
     )
 
     parsed_candidates = [
         amount
-        for amount in (
-            parse_amount(value)
-            for value in currency_amounts
-        )
-        if amount is not None
+        for amount in (parse_amount(value) for value in currency_amounts)
+        if amount is not None and amount > 0
     ]
 
     if result["amount"] is None and parsed_candidates:
@@ -692,18 +743,11 @@ def extract_amounts(
             result["tax"],
             result["total"],
         }
-
         candidates = [
-            amount
-            for amount in parsed_candidates
+            amount for amount in parsed_candidates
             if amount not in excluded_values
         ]
-
-        result["amount"] = (
-            max(candidates)
-            if candidates
-            else max(parsed_candidates)
-        )
+        result["amount"] = candidates[0] if candidates else parsed_candidates[0]
 
     return result
 
@@ -713,7 +757,7 @@ def extract_amounts(
 # ============================================================
 
 def normalize_search_text(value: Any) -> str:
-    """Normaliza texto para comparaciones tolerantes a acentos."""
+    """Normaliza texto para comparar etiquetas aunque OCR altere acentos."""
     import unicodedata
 
     normalized = clean_text(value).lower()
@@ -722,35 +766,43 @@ def normalize_search_text(value: Any) -> str:
         for character in unicodedata.normalize("NFD", normalized)
         if unicodedata.category(character) != "Mn"
     )
-    return normalized
+    normalized = normalized.replace("º", "o").replace("°", "o")
+    normalized = re.sub(r"[^a-z0-9#]+", " ", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
 
 
 def clean_reference_candidate(value: Any) -> str:
-    """Conserva únicamente caracteres válidos de una referencia."""
-    candidate = clean_text(value).upper().replace("#", "")
-    return re.sub(r"[^A-Z0-9-]", "", candidate)
+    """
+    Limpia una referencia preservando ceros iniciales y letras.
+
+    Ejemplos válidos:
+    - 008666
+    - 205496894
+    - BSALVSS20260721133529842861C767580
+    """
+    candidate = clean_text(value).upper()
+    candidate = candidate.replace("#", "")
+    candidate = re.sub(r"\s+", "", candidate)
+    candidate = re.sub(r"[^A-Z0-9-]", "", candidate)
+    return candidate.strip("-")
 
 
 def build_positioned_items(
     detected_items: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Agrega límites y centros geométricos a cada bloque OCR."""
+    """Agrega coordenadas resumidas a los fragmentos detectados."""
     positioned: list[dict[str, Any]] = []
 
     for item in detected_items:
-        box = item.get("box")
-        text = clean_text(item.get("text"))
-
-        if not box or not text:
+        box = item.get("box") or []
+        if not box:
             continue
 
         x_values = [float(point[0]) for point in box]
         y_values = [float(point[1]) for point in box]
-
         positioned.append(
             {
                 **item,
-                "text": text,
                 "x_min": min(x_values),
                 "x_max": max(x_values),
                 "y_min": min(y_values),
@@ -765,22 +817,16 @@ def build_positioned_items(
 
 def group_items_into_lines(
     items: list[dict[str, Any]],
-    vertical_tolerance: float = 24.0,
+    vertical_tolerance: float = 26.0,
 ) -> list[list[dict[str, Any]]]:
-    """Agrupa fragmentos OCR que pertenecen a la misma línea."""
+    """Agrupa bloques OCR que pertenecen visualmente a una misma línea."""
     lines: list[list[dict[str, Any]]] = []
 
-    for item in sorted(
-        items,
-        key=lambda current: (current["y_center"], current["x_min"]),
-    ):
+    for item in sorted(items, key=lambda current: (current["y_center"], current["x_min"])):
         selected_line: list[dict[str, Any]] | None = None
 
         for line in lines:
-            average_y = sum(
-                current["y_center"] for current in line
-            ) / len(line)
-
+            average_y = sum(current["y_center"] for current in line) / len(line)
             if abs(item["y_center"] - average_y) <= vertical_tolerance:
                 selected_line = line
                 break
@@ -796,23 +842,113 @@ def group_items_into_lines(
     return lines
 
 
+REFERENCE_LABEL_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    (
+        "authorization",
+        re.compile(r"\b(?:autorizacion|authorization|auth)\b", re.IGNORECASE),
+    ),
+    (
+        "receipt_number",
+        re.compile(
+            r"\b(?:n(?:o|0)?\s*(?:de\s*)?comprobante|"
+            r"numero\s+de\s+comprobante|comprobante)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "reference",
+        re.compile(
+            r"\b(?:referencia|numero\s+de\s+referencia|ref)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "confirmation",
+        re.compile(r"\b(?:confirmacion|confirmation)\b", re.IGNORECASE),
+    ),
+    (
+        "operation",
+        re.compile(
+            r"\b(?:numero\s+de\s+operacion|operacion|"
+            r"numero\s+de\s+transaccion|transaccion)\b",
+            re.IGNORECASE,
+        ),
+    ),
+]
+
+
+def detect_reference_label(value: Any) -> tuple[str, re.Match[str]] | None:
+    """Identifica el tipo de etiqueta que precede a la referencia."""
+    normalized = normalize_search_text(value)
+
+    for label_type, pattern in REFERENCE_LABEL_PATTERNS:
+        match = pattern.search(normalized)
+        if match:
+            return label_type, match
+
+    return None
+
+
+def is_valid_reference_candidate(value: Any, label_type: str) -> bool:
+    """Valida candidatos sin imponer una longitud única para todos los bancos."""
+    candidate = clean_reference_candidate(value)
+
+    if not candidate or not re.search(r"\d", candidate):
+        return False
+
+    if label_type == "authorization":
+        return 8 <= len(candidate) <= 50
+
+    return 5 <= len(candidate) <= 25
+
+
 def extract_reference(text: str) -> str:
-    """Extractor de respaldo basado únicamente en texto."""
-    patterns = [
-        r"(?:confirmaci[oó]n|referencia|"
-        r"n[uú]mero\s+de\s+referencia|"
-        r"transacci[oó]n|"
-        r"n[uú]mero\s+de\s+operaci[oó]n|"
-        r"operaci[oó]n)"
-        r"\s*[:#-]?\s*([A-Z0-9\-]{5,})",
-        r"#\s*([A-Z0-9\-]{5,})",
+    """Respaldo textual para referencias de Panamá y El Salvador."""
+    normalized_lines = [clean_text(line) for line in str(text).splitlines() if clean_text(line)]
+
+    patterns: list[tuple[str, re.Pattern[str]]] = [
+        (
+            "authorization",
+            re.compile(
+                r"(?:autorizaci[oó]n|authorization|auth)\s*[:#-]?\s*"
+                r"([A-Z0-9-]{8,50})",
+                re.IGNORECASE,
+            ),
+        ),
+        (
+            "receipt_number",
+            re.compile(
+                r"(?:N\s*[°ºo0]?\s*(?:de\s*)?comprobante|"
+                r"n[uú]mero\s+de\s+comprobante|comprobante)"
+                r"\s*[:#-]?\s*([A-Z0-9-]{5,25})",
+                re.IGNORECASE,
+            ),
+        ),
+        (
+            "reference",
+            re.compile(
+                r"(?:referencia|n[uú]mero\s+de\s+referencia|ref)"
+                r"\s*[:#-]?\s*([A-Z0-9-]{5,25})",
+                re.IGNORECASE,
+            ),
+        ),
+        (
+            "confirmation",
+            re.compile(
+                r"(?:confirmaci[oó]n|confirmation)"
+                r"\s*[:#-]?\s*([A-Z0-9-]{5,25})",
+                re.IGNORECASE,
+            ),
+        ),
     ]
 
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-
+    joined_text = "\n".join(normalized_lines)
+    for label_type, pattern in patterns:
+        match = pattern.search(joined_text)
         if match:
-            return clean_reference_candidate(match.group(1))
+            candidate = clean_reference_candidate(match.group(1))
+            if is_valid_reference_candidate(candidate, label_type):
+                return candidate
 
     return ""
 
@@ -822,441 +958,81 @@ def extract_reference_from_items(
     raw_text: str,
 ) -> str:
     """
-    Extrae la referencia usando texto y posición. Une fragmentos que
-    EasyOCR haya separado, por ejemplo ``1815312`` + ``714``.
+    Extrae la referencia por etiqueta y posición.
+
+    Soporta los formatos observados en El Salvador:
+    - REFERENCIA: 008666
+    - N° comprobante 205496894
+    - Autorización BSALVSS...
+    - Confirmación #1815312714
     """
     positioned_items = build_positioned_items(detected_items)
     lines = group_items_into_lines(positioned_items)
 
-    keywords = (
-        "confirmacion",
-        "referencia",
-        "numero de referencia",
-        "numero de operacion",
-        "transaccion",
-        "operacion",
-    )
+    # Se procesan por prioridad: autorización, número de comprobante,
+    # referencia, confirmación y operación.
+    for desired_type, _ in REFERENCE_LABEL_PATTERNS:
+        for line_index, line in enumerate(lines):
+            line_text = " ".join(item["text"] for item in line)
+            label_info = detect_reference_label(line_text)
 
-    for line_index, line in enumerate(lines):
-        line_text = " ".join(item["text"] for item in line)
-        normalized_line = normalize_search_text(line_text)
-
-        if not any(keyword in normalized_line for keyword in keywords):
-            continue
-
-        label_items = [
-            item
-            for item in line
-            if any(
-                keyword in normalize_search_text(item["text"])
-                for keyword in keywords
-            )
-        ]
-        label_x_max = max(
-            (item["x_max"] for item in label_items),
-            default=min(item["x_min"] for item in line),
-        )
-
-        same_line_parts: list[str] = []
-        for item in line:
-            candidate = clean_reference_candidate(item["text"])
-            item_is_label = any(
-                keyword in normalize_search_text(item["text"])
-                for keyword in keywords
-            )
-
-            if (
-                not item_is_label
-                and item["x_min"] >= label_x_max - 10
-                and re.search(r"\d", candidate)
-            ):
-                same_line_parts.append(candidate)
-
-        combined_same_line = "".join(same_line_parts)
-        if len(combined_same_line) >= 5:
-            return combined_same_line
-
-        # En muchos comprobantes la etiqueta aparece en una línea y
-        # la referencia inmediatamente debajo. Se revisan hasta dos
-        # líneas cercanas para recuperar números divididos en bloques.
-        below_parts: list[str] = []
-        label_bottom = max(item["y_max"] for item in line)
-
-        for next_line in lines[line_index + 1 : line_index + 3]:
-            next_top = min(item["y_min"] for item in next_line)
-            vertical_gap = next_top - label_bottom
-
-            if vertical_gap < -15 or vertical_gap > 120:
+            if not label_info or label_info[0] != desired_type:
                 continue
 
-            for item in next_line:
+            label_items = [
+                item for item in line
+                if detect_reference_label(item["text"])
+            ]
+            label_x_max = max(
+                (item["x_max"] for item in label_items),
+                default=min(item["x_min"] for item in line),
+            )
+
+            # 1) Valor a la derecha de la etiqueta en la misma línea.
+            same_line_candidates: list[str] = []
+            for item in line:
+                if detect_reference_label(item["text"]):
+                    continue
+                if item["x_min"] < label_x_max - 12:
+                    continue
+
                 candidate = clean_reference_candidate(item["text"])
+                if candidate and re.search(r"\d", candidate):
+                    same_line_candidates.append(candidate)
 
-                if (
-                    candidate
-                    and re.fullmatch(r"[A-Z0-9-]+", candidate)
-                    and re.search(r"\d", candidate)
-                ):
-                    below_parts.append(candidate)
+            combined_same_line = "".join(same_line_candidates)
+            if is_valid_reference_candidate(combined_same_line, desired_type):
+                return combined_same_line
 
-            if below_parts:
-                combined_below = "".join(below_parts)
+            # 2) Valor inmediatamente debajo de la etiqueta.
+            label_bottom = max(item["y_max"] for item in line)
 
-                if len(combined_below) >= 5:
+            for next_line in lines[line_index + 1 : line_index + 3]:
+                next_top = min(item["y_min"] for item in next_line)
+                vertical_gap = next_top - label_bottom
+
+                if vertical_gap < -10 or vertical_gap > 110:
+                    continue
+
+                parts: list[str] = []
+                for item in next_line:
+                    # Detenerse si la siguiente línea ya es otra etiqueta.
+                    if detect_reference_label(item["text"]):
+                        continue
+
+                    candidate = clean_reference_candidate(item["text"])
+                    if candidate and re.search(r"\d", candidate):
+                        parts.append(candidate)
+
+                combined_below = "".join(parts)
+                if is_valid_reference_candidate(combined_below, desired_type):
                     return combined_below
 
-    # Reconstruye líneas completas antes del respaldo tradicional.
     reconstructed_text = "\n".join(
         " ".join(item["text"] for item in line)
         for line in lines
     )
-
     return extract_reference(reconstructed_text) or extract_reference(raw_text)
-
-
-REFERENCE_KEYWORDS = (
-    "confirmacion",
-    "referencia",
-    "numero de referencia",
-    "numero de operacion",
-    "transaccion",
-    "operacion",
-)
-
-
-def find_reference_label(
-    detected_items: list[dict[str, Any]],
-) -> dict[str, Any] | None:
-    """Localiza la etiqueta de referencia y conserva sus coordenadas."""
-    positioned_items = build_positioned_items(detected_items)
-
-    for item in positioned_items:
-        normalized_text = normalize_search_text(item["text"])
-
-        if any(
-            keyword in normalized_text
-            for keyword in REFERENCE_KEYWORDS
-        ):
-            return item
-
-    return None
-
-
-def prepare_reference_variants(
-    reference_region: Image.Image,
-) -> list[Image.Image]:
-    """Genera varias versiones ampliadas de la zona de referencia."""
-    if reference_region.width <= 0 or reference_region.height <= 0:
-        return []
-
-    enlarged = reference_region.resize(
-        (
-            reference_region.width * 4,
-            reference_region.height * 4,
-        ),
-        Image.Resampling.LANCZOS,
-    )
-
-    grayscale = ImageOps.grayscale(enlarged)
-    autocontrast = ImageOps.autocontrast(grayscale, cutoff=1)
-    high_contrast = ImageEnhance.Contrast(autocontrast).enhance(2.0)
-    sharpened = high_contrast.filter(
-        ImageFilter.UnsharpMask(radius=2, percent=180, threshold=2)
-    )
-
-    threshold_135 = sharpened.point(
-        lambda pixel: 255 if pixel > 135 else 0
-    )
-    threshold_165 = sharpened.point(
-        lambda pixel: 255 if pixel > 165 else 0
-    )
-    threshold_195 = sharpened.point(
-        lambda pixel: 255 if pixel > 195 else 0
-    )
-
-    return [
-        enlarged,
-        grayscale,
-        autocontrast,
-        high_contrast,
-        sharpened,
-        threshold_135,
-        threshold_165,
-        threshold_195,
-    ]
-
-
-def extract_digits(value: Any) -> str:
-    """Conserva únicamente los dígitos de una posible referencia."""
-    return re.sub(r"\D", "", clean_text(value))
-
-
-def reference_similarity(value_a: Any, value_b: Any) -> float:
-    """Calcula la similitud entre dos lecturas OCR de una referencia."""
-    digits_a = extract_digits(value_a)
-    digits_b = extract_digits(value_b)
-
-    if not digits_a or not digits_b:
-        return 0.0
-
-    return SequenceMatcher(None, digits_a, digits_b).ratio()
-
-
-def normalize_reference_length(
-    second_pass_reference: Any,
-    first_pass_reference: Any = "",
-    expected_length: int = 10,
-) -> str:
-    """
-    Elimina dígitos falsos agregados alrededor de una referencia.
-
-    EasyOCR puede interpretar el símbolo ``#`` como ``8`` y también
-    capturar un carácter cercano al final. Cuando la segunda lectura
-    contiene más dígitos de los esperados, se generan todas las ventanas
-    posibles y se selecciona la más parecida a la primera lectura OCR.
-
-    Ejemplo:
-        segunda lectura: 818153127145
-        primera lectura: 181531214
-        resultado:        1815312714
-    """
-    second_pass = extract_digits(second_pass_reference)
-    first_pass = extract_digits(first_pass_reference)
-
-    if expected_length <= 0:
-        return first_pass or second_pass
-
-    if not second_pass:
-        return first_pass
-
-    if len(second_pass) == expected_length:
-        return second_pass
-
-    if len(second_pass) < expected_length:
-        if len(first_pass) == expected_length:
-            return first_pass
-
-        return (
-            second_pass
-            if len(second_pass) >= len(first_pass)
-            else first_pass
-        )
-
-    windows = [
-        second_pass[index:index + expected_length]
-        for index in range(
-            len(second_pass) - expected_length + 1
-        )
-    ]
-
-    if not windows:
-        return first_pass or second_pass
-
-    if first_pass:
-        return max(
-            windows,
-            key=lambda candidate: (
-                reference_similarity(candidate, first_pass),
-                -abs(
-                    (second_pass.find(candidate) + expected_length / 2)
-                    - len(second_pass) / 2
-                ),
-            ),
-        )
-
-    # Sin una primera lectura útil, se escoge la ventana más centrada.
-    # Esto evita favorecer el falso 8 que suele producir el símbolo #.
-    return min(
-        windows,
-        key=lambda candidate: abs(
-            (second_pass.find(candidate) + expected_length / 2)
-            - len(second_pass) / 2
-        ),
-    )
-
-
-def select_reference_candidate(
-    ocr_results: list,
-) -> dict[str, Any] | None:
-    """
-    Selecciona únicamente la primera línea numérica válida del recorte.
-
-    Los fragmentos que estén en la misma línea se unen de izquierda a
-    derecha, pero nunca se combinan números de líneas diferentes.
-    """
-    positioned: list[dict[str, Any]] = []
-
-    for box, detected_text, confidence in ocr_results:
-        digits = extract_digits(detected_text)
-
-        if not digits:
-            continue
-
-        x_values = [float(point[0]) for point in box]
-        y_values = [float(point[1]) for point in box]
-
-        positioned.append(
-            {
-                "digits": digits,
-                "confidence": float(confidence),
-                "x_min": min(x_values),
-                "y_min": min(y_values),
-                "y_max": max(y_values),
-                "y_center": sum(y_values) / len(y_values),
-            }
-        )
-
-    if not positioned:
-        return None
-
-    # Agrupa únicamente fragmentos que pertenecen a una misma línea.
-    lines: list[list[dict[str, Any]]] = []
-
-    for item in sorted(
-        positioned,
-        key=lambda current: (current["y_center"], current["x_min"]),
-    ):
-        selected_line: list[dict[str, Any]] | None = None
-
-        for line in lines:
-            average_y = sum(
-                current["y_center"] for current in line
-            ) / len(line)
-
-            # La imagen fue ampliada 4x, por eso se usa una tolerancia
-            # moderada para fragmentos de la misma referencia.
-            if abs(item["y_center"] - average_y) <= 35:
-                selected_line = line
-                break
-
-        if selected_line is None:
-            lines.append([item])
-        else:
-            selected_line.append(item)
-
-    line_candidates: list[dict[str, Any]] = []
-
-    for line in lines:
-        ordered_line = sorted(line, key=lambda current: current["x_min"])
-        reference = "".join(current["digits"] for current in ordered_line)
-
-        # Rango razonable para referencias bancarias.
-        if not 6 <= len(reference) <= 20:
-            continue
-
-        weighted_confidence = sum(
-            current["confidence"] * len(current["digits"])
-            for current in ordered_line
-        ) / max(len(reference), 1)
-
-        line_candidates.append(
-            {
-                "reference": reference,
-                "confidence": weighted_confidence,
-                "y_center": sum(
-                    current["y_center"] for current in ordered_line
-                ) / len(ordered_line),
-            }
-        )
-
-    if not line_candidates:
-        return None
-
-    # La referencia es la primera línea numérica inmediatamente debajo
-    # de la etiqueta Confirmación/Referencia.
-    line_candidates.sort(
-        key=lambda candidate: (
-            candidate["y_center"],
-            -candidate["confidence"],
-        )
-    )
-
-    return line_candidates[0]
-
-
-def reread_reference_region(
-    processed_image: Image.Image,
-    detected_items: list[dict[str, Any]],
-    reader: easyocr.Reader,
-) -> dict[str, Any] | None:
-    """
-    Recorta la zona inmediatamente debajo de Confirmación/Referencia
-    y ejecuta una segunda lectura restringida exclusivamente a números.
-    """
-    label = find_reference_label(detected_items)
-
-    if label is None:
-        return None
-
-    image_width, image_height = processed_image.size
-
-    # Recorte estrecho: evita capturar números del pie de página o de
-    # secciones vecinas.
-    x1 = max(int(label["x_min"]) - 15, 0)
-    x2 = min(int(label["x_max"]) + 260, image_width)
-    y1 = max(int(label["y_max"]) - 3, 0)
-    y2 = min(int(label["y_max"]) + 75, image_height)
-
-    if x2 <= x1 or y2 <= y1:
-        return None
-
-    reference_region = processed_image.crop((x1, y1, x2, y2))
-    variants = prepare_reference_variants(reference_region)
-    candidates: list[dict[str, Any]] = []
-
-    for variant_index, variant in enumerate(variants):
-        second_pass_results = reader.readtext(
-            np.array(variant),
-            detail=1,
-            paragraph=False,
-            decoder="beamsearch",
-            allowlist="0123456789",
-            text_threshold=0.35,
-            low_text=0.25,
-            link_threshold=0.25,
-            contrast_ths=0.05,
-            adjust_contrast=0.7,
-            mag_ratio=2.0,
-        )
-
-        selected_candidate = select_reference_candidate(
-            second_pass_results
-        )
-
-        if selected_candidate:
-            selected_candidate["variant"] = variant_index
-            candidates.append(selected_candidate)
-
-    if not candidates:
-        return None
-
-    # Favorece el valor reconocido de forma consistente por varias
-    # variantes de imagen, en lugar de escoger simplemente el más largo.
-    grouped: dict[str, list[dict[str, Any]]] = {}
-
-    for candidate in candidates:
-        grouped.setdefault(candidate["reference"], []).append(candidate)
-
-    ranked_candidates: list[dict[str, Any]] = []
-
-    for reference, matches in grouped.items():
-        ranked_candidates.append(
-            {
-                "reference": reference,
-                "votes": len(matches),
-                "confidence": sum(
-                    match["confidence"] for match in matches
-                ) / len(matches),
-            }
-        )
-
-    return max(
-        ranked_candidates,
-        key=lambda candidate: (
-            candidate["votes"],
-            candidate["confidence"],
-        ),
-    )
 
 
 # ============================================================
@@ -1345,30 +1121,10 @@ def process_receipt(file_bytes: bytes) -> dict[str, Any]:
         else 0.0
     )
 
-    regular_reference = extract_reference_from_items(
+    final_reference = extract_reference_from_items(
         detected_items,
         raw_text,
     )
-
-    reference_second_pass = reread_reference_region(
-        processed_image=processed_image,
-        detected_items=detected_items,
-        reader=reader,
-    )
-
-    final_reference = extract_digits(regular_reference)
-
-    if reference_second_pass:
-        second_pass_value = reference_second_pass["reference"]
-
-        # Para este formato bancario la referencia esperada contiene
-        # 10 dígitos. La normalización elimina caracteres falsos alrededor
-        # del valor, como el 8 producido cuando OCR confunde el símbolo #.
-        final_reference = normalize_reference_length(
-            second_pass_reference=second_pass_value,
-            first_pass_reference=regular_reference,
-            expected_length=10,
-        )
 
     return {
         "raw_text": raw_text,
@@ -1570,6 +1326,14 @@ with form_column:
         key=date_widget_key,
     )
 
+    if uploaded_file is None:
+        st.html(
+            """
+<div class="required-message">
+    Este documento es obligatorio
+</div>
+"""
+        )
 
     parsed_amount = parse_amount(amount)
 
