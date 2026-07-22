@@ -1195,6 +1195,170 @@ def preprocess_image(image: Image.Image) -> Image.Image:
     return processed
 
 
+
+
+def normalize_ocr_label(value: Any) -> str:
+    """Normaliza etiquetas OCR sin modificar los valores numéricos."""
+    normalized = normalize_search_text(value).upper()
+    replacements = {
+        "REFERENC1A": "REFERENCIA",
+        "REFERENClA": "REFERENCIA",
+        "REFERENCLA": "REFERENCIA",
+        "USO": "USD",
+        "US0": "USD",
+        "U5D": "USD",
+    }
+    for wrong, correct in replacements.items():
+        normalized = normalized.replace(wrong, correct)
+    return normalized
+
+
+def extract_reference_el_salvador_text(raw_text: str) -> str:
+    """
+    Extrae referencias salvadoreñas únicamente después de etiquetas válidas.
+    DEP_ATM se excluye expresamente para evitar falsos positivos.
+    """
+    lines = [clean_text(line) for line in str(raw_text).splitlines() if clean_text(line)]
+
+    patterns = [
+        re.compile(r"\bREFERENCIA\s*[:#\-]?\s*([A-Z0-9\-]{5,40})\b", re.I),
+        re.compile(r"\bN\s*[°ºO0]?\.?\s*(?:DE\s+)?COMPROBANTE\s*[:#\-]?\s*([A-Z0-9\-]{5,40})\b", re.I),
+        re.compile(r"\bNUMERO\s+(?:DE\s+)?COMPROBANTE\s*[:#\-]?\s*([A-Z0-9\-]{5,40})\b", re.I),
+        re.compile(r"\bAUTORIZACION\s*[:#\-]?\s*([A-Z0-9\-]{5,60})\b", re.I),
+        re.compile(r"\bCONFIRMACION\s*[:#\-]?\s*([A-Z0-9\-]{5,40})\b", re.I),
+    ]
+
+    normalized_lines = [normalize_ocr_label(line) for line in lines]
+    for line in normalized_lines:
+        if "DEP_ATM" in line or "DEP ATM" in line:
+            continue
+        for pattern in patterns:
+            match = pattern.search(line)
+            if match:
+                candidate = clean_reference_candidate(match.group(1))
+                if candidate:
+                    return candidate
+
+    # Cuando etiqueta y valor quedan en líneas separadas, revisar solo la línea inmediata siguiente.
+    valid_labels = ("REFERENCIA", "NO COMPROBANTE", "N COMPROBANTE", "NUMERO DE COMPROBANTE", "AUTORIZACION", "CONFIRMACION")
+    for i, line in enumerate(normalized_lines[:-1]):
+        if "DEP_ATM" in line or "DEP ATM" in line:
+            continue
+        if not any(label in line for label in valid_labels):
+            continue
+        next_line = normalized_lines[i + 1]
+        if "DEP_ATM" in next_line or "DEP ATM" in next_line:
+            continue
+        match = re.search(r"(?<![A-Z0-9])([A-Z0-9\-]{5,60})(?![A-Z0-9])", next_line)
+        if match:
+            candidate = clean_reference_candidate(match.group(1))
+            if candidate:
+                return candidate
+
+    return ""
+
+
+def extract_amount_el_salvador_text(raw_text: str) -> float | None:
+    """Extrae montos salvadoreños tolerando USD/USO/US0/U5D y líneas separadas."""
+    normalized = normalize_ocr_label(raw_text)
+    amount = r"([0-9]{1,6}(?:[.,][0-9]{3})*[.,][0-9]{2}|[0-9]+[.,][0-9]{2})"
+    patterns = [
+        rf"\bUSD\b\s*[:\-]?\s*\$?\s*{amount}",
+        rf"\bMONTO\s+DEBITADO\b\s*[:\-]?\s*\$?\s*{amount}",
+        rf"\bMONTO\b\s*[:\-]?\s*\$?\s*{amount}",
+        rf"\bTRANSFERISTE\b\s*[:\-]?\s*\$?\s*{amount}",
+        rf"\bTOTAL\b\s*[:\-]?\s*\$?\s*{amount}",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, normalized, re.I)
+        if match:
+            value = parse_amount(match.group(1))
+            if value is not None and 0 < value <= 20000:
+                return value
+
+    # Respaldo secuencial: localizar USD y revisar los siguientes tokens OCR.
+    tokens = normalized.split()
+    for i, token in enumerate(tokens):
+        if token.rstrip(":.-") != "USD":
+            continue
+        for candidate_token in tokens[i + 1:i + 5]:
+            match = re.search(amount, candidate_token)
+            if match:
+                value = parse_amount(match.group(1))
+                if value is not None and 0 < value <= 20000:
+                    return value
+    return None
+
+
+def extract_atm_reference_strict(detected_items: list[dict[str, Any]]) -> str:
+    """
+    Extrae el número de la línea REFERENCIA y nunca utiliza el valor de DEP_ATM.
+    Conserva ceros iniciales.
+    """
+    positioned = build_positioned_items(detected_items)
+    lines = group_items_into_lines(positioned, vertical_tolerance=34.0)
+    digit_group = re.compile(r"(?<!\d)(\d{5,30})(?!\d)")
+
+    for line_index, line in enumerate(lines):
+        line_text = " ".join(item["text"] for item in line)
+        normalized = normalize_ocr_label(line_text)
+        if "DEP_ATM" in normalized or "DEP ATM" in normalized:
+            continue
+        if not looks_like_label(line_text, ("referencia",), threshold=0.60):
+            continue
+
+        # Tomar exclusivamente grupos numéricos de la línea de REFERENCIA.
+        matches = digit_group.findall(line_text)
+        if matches:
+            return matches[-1]
+
+        # Si el valor está separado, revisar solo la siguiente línea cercana.
+        label_bottom = max(item["y_max"] for item in line)
+        for next_line in lines[line_index + 1:line_index + 2]:
+            next_top = min(item["y_min"] for item in next_line)
+            if next_top - label_bottom > 85:
+                continue
+            next_text = " ".join(item["text"] for item in next_line)
+            next_normalized = normalize_ocr_label(next_text)
+            if "DEP_ATM" in next_normalized or "DEP ATM" in next_normalized:
+                continue
+            matches = digit_group.findall(next_text)
+            if matches:
+                return matches[0]
+    return ""
+
+
+def extract_atm_amount_strict(detected_items: list[dict[str, Any]]) -> float | None:
+    """Busca el decimal en la línea USD o en la línea inmediatamente siguiente."""
+    positioned = build_positioned_items(detected_items)
+    lines = group_items_into_lines(positioned, vertical_tolerance=34.0)
+    amount_pattern = re.compile(r"(?<!\d)(\d{1,6}[.,]\d{2})(?!\d)")
+
+    for line_index, line in enumerate(lines):
+        line_text = " ".join(item["text"] for item in line)
+        normalized = normalize_ocr_label(line_text)
+        if not (re.search(r"\bUSD\b", normalized) or looks_like_label(line_text, ("USD",), threshold=0.58)):
+            continue
+
+        match = amount_pattern.search(line_text)
+        if match:
+            value = parse_amount(match.group(1))
+            if value is not None and 0 < value <= 20000:
+                return value
+
+        label_bottom = max(item["y_max"] for item in line)
+        for next_line in lines[line_index + 1:line_index + 2]:
+            next_top = min(item["y_min"] for item in next_line)
+            if next_top - label_bottom > 90:
+                continue
+            next_text = " ".join(item["text"] for item in next_line)
+            match = amount_pattern.search(next_text)
+            if match:
+                value = parse_amount(match.group(1))
+                if value is not None and 0 < value <= 20000:
+                    return value
+    return None
+
 @st.cache_resource
 def load_reader() -> easyocr.Reader:
     """Carga EasyOCR una sola vez."""
@@ -1206,11 +1370,8 @@ def load_reader() -> easyocr.Reader:
 
 @st.cache_data(show_spinner=False)
 def process_receipt(file_bytes: bytes) -> dict[str, Any]:
-    """Ejecuta OCR y devuelve los campos requeridos."""
-    image = Image.open(
-        BytesIO(file_bytes)
-    ).convert("RGB")
-
+    """Ejecuta OCR y devuelve monto, referencia y fecha."""
+    image = Image.open(BytesIO(file_bytes)).convert("RGB")
     processed_image = preprocess_image(image)
     reader = load_reader()
 
@@ -1221,54 +1382,58 @@ def process_receipt(file_bytes: bytes) -> dict[str, Any]:
         decoder="beamsearch",
     )
 
+    # Ordenar por posición para conservar el orden visual del comprobante.
+    sorted_results = sorted(
+        results,
+        key=lambda result: (
+            min(float(point[1]) for point in result[0]),
+            min(float(point[0]) for point in result[0]),
+        ),
+    )
+
     detected_lines: list[str] = []
     detected_items: list[dict[str, Any]] = []
     confidences: list[float] = []
 
-    for box, detected_text, confidence in results:
+    for box, detected_text, confidence in sorted_results:
         detected_text = clean_text(detected_text)
-
-        if detected_text:
-            numeric_confidence = float(confidence)
-            detected_lines.append(detected_text)
-            confidences.append(numeric_confidence)
-            detected_items.append(
-                {
-                    "box": box,
-                    "text": detected_text,
-                    "confidence": numeric_confidence,
-                }
-            )
+        if not detected_text:
+            continue
+        numeric_confidence = float(confidence)
+        detected_lines.append(detected_text)
+        confidences.append(numeric_confidence)
+        detected_items.append({
+            "box": box,
+            "text": detected_text,
+            "confidence": numeric_confidence,
+        })
 
     raw_text = "\n".join(detected_lines)
-    amounts = extract_amounts(
-        raw_text,
-        detected_items=detected_items,
-    )
+    amounts = extract_amounts(raw_text, detected_items=detected_items)
 
-    # Respaldo especializado para recibos ATM impresos de El Salvador.
-    if amounts["amount"] is None:
-        atm_amount = extract_atm_amount_from_items(detected_items)
-        if atm_amount is not None:
-            amounts["amount"] = atm_amount
-            amounts["original_amount"] = atm_amount
+    # Para recibos ATM, priorizar la lectura estricta asociada a USD.
+    strict_amount = extract_atm_amount_strict(detected_items)
+    if strict_amount is None:
+        strict_amount = extract_amount_el_salvador_text(raw_text)
+    if strict_amount is not None:
+        amounts["amount"] = strict_amount
+        amounts["original_amount"] = strict_amount
+        amounts["amount_corrected"] = False
+        amounts["amount_warning"] = ""
+
+    # Prioridad de referencia:
+    # 1) línea REFERENCIA estricta; 2) etiquetas salvadoreñas en texto;
+    # 3) extractor general para comprobantes digitales.
+    final_reference = extract_atm_reference_strict(detected_items)
+    if not final_reference:
+        final_reference = extract_reference_el_salvador_text(raw_text)
+    if not final_reference:
+        final_reference = extract_reference_from_items(detected_items, raw_text)
 
     average_confidence = (
         sum(confidences) / len(confidences)
-        if confidences
-        else 0.0
+        if confidences else 0.0
     )
-
-    final_reference = extract_reference_from_items(
-        detected_items,
-        raw_text,
-    )
-
-    # La etiqueta y el número pueden quedar dentro de un único bloque OCR.
-    # Este respaldo además tolera errores leves en la palabra REFERENCIA.
-    atm_reference = extract_atm_reference_from_items(detected_items)
-    if not final_reference and atm_reference:
-        final_reference = atm_reference
 
     return {
         "raw_text": raw_text,
