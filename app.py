@@ -1785,7 +1785,7 @@ with form_column:
         key=date_widget_key,
     )
 
-        )
+
 
     parsed_amount = parse_amount(amount)
 
