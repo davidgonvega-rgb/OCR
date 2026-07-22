@@ -1328,6 +1328,151 @@ def extract_atm_reference_strict(detected_items: list[dict[str, Any]]) -> str:
     return ""
 
 
+
+def normalize_amount_label(value: Any) -> str:
+    """Normaliza etiquetas de monto sin alterar los valores numéricos."""
+    normalized = normalize_search_text(value)
+
+    replacements = {
+        "m0nto": "monto",
+        "mont0": "monto",
+        "debitad0": "debitado",
+        "debltado": "debitado",
+        "debltad0": "debitado",
+    }
+
+    for wrong, correct in replacements.items():
+        normalized = normalized.replace(wrong, correct)
+
+    return normalized
+
+
+def extract_money_from_block(value: Any) -> float | None:
+    """Extrae un monto decimal de un bloque OCR."""
+    text = clean_text(value)
+
+    match = re.search(
+        r"\$?\s*(\d{1,6}(?:[.,]\d{3})*[.,]\d{2}|\d+[.,]\d{2})",
+        text,
+    )
+
+    if not match:
+        return None
+
+    amount = parse_amount(match.group(1))
+
+    if amount is None or not (0 < amount <= 20000):
+        return None
+
+    return amount
+
+
+def extract_labeled_amount_from_items(
+    detected_items: list[dict[str, Any]],
+) -> float | None:
+    """
+    Extrae montos cuando la etiqueta y el valor aparecen en bloques
+    separados, por ejemplo:
+
+        Monto debitado                         $10.00
+
+    También reconoce Monto, Total y Transferiste. Se utilizan las
+    coordenadas OCR para seleccionar el valor alineado a la derecha
+    o inmediatamente debajo de la etiqueta.
+    """
+    positioned = build_positioned_items(detected_items)
+
+    if not positioned:
+        return None
+
+    label_priorities = (
+        "monto debitado",
+        "monto transferido",
+        "monto depositado",
+        "transferiste",
+        "monto",
+        "total",
+    )
+
+    for expected_label in label_priorities:
+        labels = [
+            item
+            for item in positioned
+            if expected_label in normalize_amount_label(item["text"])
+        ]
+
+        for label in labels:
+            # Caso 1: etiqueta y monto fueron reconocidos en el mismo bloque.
+            amount_in_label = extract_money_from_block(label["text"])
+
+            if amount_in_label is not None:
+                return amount_in_label
+
+            candidates: list[dict[str, Any]] = []
+
+            for item in positioned:
+                if item is label:
+                    continue
+
+                amount = extract_money_from_block(item["text"])
+
+                if amount is None:
+                    continue
+
+                horizontal_gap = item["x_min"] - label["x_max"]
+                vertical_distance = abs(
+                    item["y_center"] - label["y_center"]
+                )
+
+                # Valor alineado a la derecha en la misma fila.
+                same_row = vertical_distance <= 38
+                right_of_label = horizontal_gap >= -12
+
+                if same_row and right_of_label:
+                    candidates.append(
+                        {
+                            "amount": amount,
+                            "score": (
+                                vertical_distance
+                                + max(horizontal_gap, 0) * 0.025
+                                - float(item.get("confidence", 0.0)) * 8
+                            ),
+                        }
+                    )
+                    continue
+
+                # Respaldo: monto inmediatamente debajo de la etiqueta.
+                vertical_gap = item["y_min"] - label["y_max"]
+                horizontally_related = (
+                    item["x_center"] >= label["x_min"] - 30
+                )
+
+                if (
+                    0 <= vertical_gap <= 85
+                    and horizontally_related
+                ):
+                    candidates.append(
+                        {
+                            "amount": amount,
+                            "score": (
+                                50
+                                + vertical_gap
+                                + abs(item["x_center"] - label["x_center"]) * 0.02
+                                - float(item.get("confidence", 0.0)) * 8
+                            ),
+                        }
+                    )
+
+            if candidates:
+                best_candidate = min(
+                    candidates,
+                    key=lambda candidate: candidate["score"],
+                )
+                return best_candidate["amount"]
+
+    return None
+
+
 def extract_atm_amount_strict(detected_items: list[dict[str, Any]]) -> float | None:
     """Busca el decimal en la línea USD o en la línea inmediatamente siguiente."""
     positioned = build_positioned_items(detected_items)
@@ -1411,8 +1556,13 @@ def process_receipt(file_bytes: bytes) -> dict[str, Any]:
     raw_text = "\n".join(detected_lines)
     amounts = extract_amounts(raw_text, detected_items=detected_items)
 
-    # Para recibos ATM, priorizar la lectura estricta asociada a USD.
-    strict_amount = extract_atm_amount_strict(detected_items)
+    # Prioridad de monto:
+    # 1) etiqueta y valor alineados por coordenadas (Monto debitado / Monto);
+    # 2) recibos ATM asociados a USD;
+    # 3) respaldo mediante expresiones regulares sobre el texto completo.
+    strict_amount = extract_labeled_amount_from_items(detected_items)
+    if strict_amount is None:
+        strict_amount = extract_atm_amount_strict(detected_items)
     if strict_amount is None:
         strict_amount = extract_amount_el_salvador_text(raw_text)
     if strict_amount is not None:
