@@ -1773,15 +1773,7 @@ with form_column:
         key=date_widget_key,
     )
 
-    if uploaded_file is None:
-        st.html(
-            """
-<div class="required-message">
-    Este documento es obligatorio
-</div>
-"""
-        )
-
+ 
     parsed_amount = parse_amount(amount)
 
     amount_is_valid = (
