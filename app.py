@@ -1767,7 +1767,7 @@ with form_column:
     )
 
     deposit_date = st.text_input(
-        "Selecciona la fecha del depósito",
+        "Fecha del depósito",
         value=st.session_state.ocr_data["date"],
         placeholder="DD / MM / YYYY",
         key=date_widget_key,
