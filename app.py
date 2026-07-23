@@ -311,6 +311,17 @@ st.html(
         background-color: #eef0f2 !important;
     }
 
+    /* Ventana emergente de confirmación */
+    div[data-testid="stDialog"] div[role="dialog"] {
+        border-radius: 10px;
+        padding: 8px;
+    }
+
+    div[data-testid="stDialog"] h2 {
+        color: #102f58;
+        font-weight: 800;
+    }
+
     /* Adaptación móvil */
     @media (max-width: 760px) {
         .nav-center {
@@ -1620,6 +1631,29 @@ if "current_file_id" not in st.session_state:
 if "ocr_data" not in st.session_state:
     st.session_state.ocr_data = DEFAULT_OCR_DATA.copy()
 
+if "form_version" not in st.session_state:
+    st.session_state.form_version = 0
+
+if "show_success_dialog" not in st.session_state:
+    st.session_state.show_success_dialog = False
+
+if "last_report_result" not in st.session_state:
+    st.session_state.last_report_result = None
+
+
+@st.dialog("Depósito reportado")
+def show_deposit_success_dialog() -> None:
+    """Muestra la confirmación y mantiene el formulario limpio."""
+    st.success(
+        "El depósito fue reportado correctamente. "
+        "Los fondos serán acreditados a tu cuenta tan pronto "
+        "la transacción sea confirmada."
+    )
+
+    if st.button("Aceptar", type="primary", width="stretch"):
+        st.session_state.show_success_dialog = False
+        st.rerun()
+
 
 # ============================================================
 # ENCABEZADO
@@ -1678,14 +1712,14 @@ with form_column:
     account = st.selectbox(
         "Selecciona la cuenta donde depositaste",
         options=DEPOSIT_ACCOUNTS,
-        key="deposit_account",
+        key=f"deposit_account_{st.session_state.form_version}",
     )
 
     uploaded_file = st.file_uploader(
         "Sube el comprobante del depósito",
         type=["jpg", "jpeg", "png"],
         help="Tamaño máximo recomendado: 3 MB.",
-        key="receipt_uploader",
+        key=f"receipt_uploader_{st.session_state.form_version}",
     )
 
     if uploaded_file is not None:
@@ -1737,15 +1771,18 @@ with form_column:
             )
 
     amount_widget_key = (
-        f"amount_{st.session_state.current_file_id or 'empty'}"
+        f"amount_{st.session_state.form_version}_"
+        f"{st.session_state.current_file_id or 'empty'}"
     )
 
     reference_widget_key = (
-        f"reference_{st.session_state.current_file_id or 'empty'}"
+        f"reference_{st.session_state.form_version}_"
+        f"{st.session_state.current_file_id or 'empty'}"
     )
 
     date_widget_key = (
-        f"date_{st.session_state.current_file_id or 'empty'}"
+        f"date_{st.session_state.form_version}_"
+        f"{st.session_state.current_file_id or 'empty'}"
     )
 
     amount = st.text_input(
@@ -1846,8 +1883,18 @@ if submit_button and uploaded_file is not None:
         ),
     }
 
-    st.success(
-        "El depósito fue reportado correctamente."
-    )
+    # Conserva el último resultado únicamente para fines internos
+    # del prototipo y reinicia por completo el formulario.
+    st.session_state.last_report_result = result
+    st.session_state.current_file_id = None
+    st.session_state.ocr_data = DEFAULT_OCR_DATA.copy()
+    st.session_state.form_version += 1
+    st.session_state.show_success_dialog = True
 
-   
+    # El rerun carga un formulario nuevo y vacío. La ventana emergente
+    # se muestra inmediatamente después de que la interfaz se reinicia.
+    st.rerun()
+
+
+if st.session_state.show_success_dialog:
+    show_deposit_success_dialog()
