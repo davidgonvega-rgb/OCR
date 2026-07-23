@@ -1641,7 +1641,7 @@ if "last_report_result" not in st.session_state:
     st.session_state.last_report_result = None
 
 
-
+@st.dialog("Depósito reportado")
 def show_deposit_success_dialog() -> None:
     """Muestra la confirmación y mantiene el formulario limpio."""
     st.success(
