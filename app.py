@@ -1721,8 +1721,7 @@ with form_column:
         st.html(
             """
 <div class="ocr-message">
-    El comprobante fue procesado automáticamente.
-    Revisa y corrige los datos antes de reportar el depósito.
+        Revisa y corrige los datos antes de reportar el depósito.
 </div>
 """
         )
