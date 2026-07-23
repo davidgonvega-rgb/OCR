@@ -1721,31 +1721,21 @@ with form_column:
         st.html(
             """
 <div class="ocr-message">
-        Revisa y corrige los datos antes de reportar el depósito.
+    El comprobante fue procesado automáticamente.
+    Revisa y corrige los datos antes de reportar el depósito.
 </div>
 """
         )
 
 
         with st.expander(
-            "Ver comprobante y texto detectado por OCR"
+            "Ver comprobante"
         ):
-            preview_column, text_column = st.columns(2)
-
-            with preview_column:
-                st.image(
-                    uploaded_file,
-                    caption="Comprobante cargado",
-                    width="stretch",
-                )
-
-            with text_column:
-                st.text_area(
-                    "Texto detectado",
-                    value=st.session_state.ocr_data["raw_text"],
-                    height=350,
-                    disabled=True,
-                )
+            st.image(
+                uploaded_file,
+                caption="Comprobante cargado",
+                width="stretch",
+            )
 
     amount_widget_key = (
         f"amount_{st.session_state.current_file_id or 'empty'}"
@@ -1784,7 +1774,14 @@ with form_column:
         key=date_widget_key,
     )
 
-
+    if uploaded_file is None:
+        st.html(
+            """
+<div class="required-message">
+    Este documento es obligatorio
+</div>
+"""
+        )
 
     parsed_amount = parse_amount(amount)
 
