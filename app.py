@@ -1760,7 +1760,7 @@ with form_column:
     )
 
     reference = st.text_input(
-        "Ingresa el número de referencia",
+        "Número de referencia",
         value=st.session_state.ocr_data["reference"],
         placeholder="Número de referencia",
         key=reference_widget_key,
