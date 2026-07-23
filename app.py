@@ -1850,7 +1850,4 @@ if submit_button and uploaded_file is not None:
         "El depósito fue reportado correctamente."
     )
 
-    with st.expander(
-        "Ver resultado del prototipo"
-    ):
-        st.json(result)
+   
